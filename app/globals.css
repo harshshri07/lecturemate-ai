@@ -6,6 +6,12 @@
   --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
   --font-serif: "Instrument Serif", "Times New Roman", serif;
   --font-mono: "JetBrains Mono", ui-monospace, monospace;
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --radius-2xl: calc(var(--radius) + 8px);
+  --radius-3xl: calc(var(--radius) + 12px);
 
   --color-background: var(--background);
   --color-foreground: var(--foreground);
@@ -40,6 +46,8 @@
 /* DARK (default) — deep editorial ink with warm cream typography */
 :root {
   --radius: 0.5rem;
+  --ink: oklch(0.11 0.01 260);
+  --cream: oklch(0.96 0.018 85);
   --background: oklch(0.11 0.01 260);
   --foreground: oklch(0.96 0.018 85);
   --surface: oklch(0.14 0.012 260);
@@ -74,6 +82,8 @@
   --shadow-elegant: 0 30px 80px -20px oklch(0.02 0.01 260 / 0.6);
   --shadow-card: 0 1px 0 oklch(1 0 0 / 0.04) inset, 0 8px 24px -8px oklch(0 0 0 / 0.4);
   --gradient-warm: linear-gradient(135deg, oklch(0.72 0.19 78) 0%, oklch(0.65 0.22 35) 100%);
+  --gradient-primary: linear-gradient(135deg, oklch(0.74 0.19 75), oklch(0.78 0.17 60));
+  --noise: url("data:image/svg+xml;utf8,<svg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0.4 0'/></filter><rect width='100%' height='100%' filter='url(%23n)'/></svg>");
 }
 
 /* LIGHT mode — warm paper */
@@ -121,12 +131,50 @@
     font-feature-settings: "cv02", "cv03", "cv04", "cv11", "ss01";
     scroll-behavior: smooth;
   }
+  :root {
+    --cursor-x: 50vw;
+    --cursor-y: 30vh;
+  }
   body {
     background-color: var(--background);
     color: var(--foreground);
     -webkit-font-smoothing: antialiased;
     text-rendering: optimizeLegibility;
   }
+
+  /* Cursor-follow glow (Lovable-style) */
+  body::before {
+    content: "";
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    z-index: 0;
+    background:
+      radial-gradient(
+        circle 220px at var(--cursor-x) var(--cursor-y),
+        color-mix(in oklab, var(--primary) 16%, transparent) 0%,
+        transparent 65%
+      );
+    opacity: 0.75;
+    mix-blend-mode: screen;
+  }
+
+  /* Gentle vignette + warm wash (prevents “flat black”) */
+  body::after {
+    content: "";
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    z-index: 0;
+    background:
+      radial-gradient(720px 520px at var(--blob1-x, 18%) var(--blob1-y, 22%), color-mix(in oklab, var(--primary) 10%, transparent) 0%, transparent 62%),
+      radial-gradient(620px 460px at var(--blob2-x, 78%) var(--blob2-y, 35%), color-mix(in oklab, var(--primary) 8%, transparent) 0%, transparent 66%),
+      radial-gradient(ellipse 90% 70% at center, transparent 55%, color-mix(in oklab, black 35%, transparent) 100%);
+    opacity: 0.85;
+  }
+
+  /* Keep app content above overlays */
+  body > * { position: relative; z-index: 1; }
   ::selection {
     background: color-mix(in oklab, var(--primary) 35%, transparent);
     color: var(--foreground);
@@ -142,6 +190,20 @@
     -webkit-background-clip: text;
     background-clip: text;
     color: transparent;
+  }
+
+  .gradient-warm { background: var(--gradient-warm); }
+  .gradient-primary { background: var(--gradient-primary); }
+
+  .noise { position: relative; }
+  .noise::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background-image: var(--noise);
+    opacity: 0.05;
+    mix-blend-mode: overlay;
+    pointer-events: none;
   }
 
   .shadow-glow { box-shadow: var(--shadow-glow); }
@@ -163,6 +225,12 @@
       linear-gradient(90deg, color-mix(in oklab, var(--foreground) 5%, transparent) 1px, transparent 1px);
     background-size: 56px 56px;
     mask-image: radial-gradient(ellipse 80% 60% at center, black, transparent 75%);
+  }
+
+  .dot-pattern {
+    background-image: radial-gradient(color-mix(in oklab, var(--foreground) 10%, transparent) 1px, transparent 1px);
+    background-size: 14px 14px;
+    mask-image: radial-gradient(ellipse 70% 55% at center, black, transparent 75%);
   }
 
   .perspective-1000 { perspective: 1200px; }

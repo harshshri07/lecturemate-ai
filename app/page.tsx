@@ -1,4 +1,4 @@
-﻿"use client";
+"use client";
 
 import React, { useState, useCallback, useRef, useEffect, useMemo } from "react";
 import { motion, AnimatePresence } from "framer-motion";
@@ -7,7 +7,7 @@ import {
   Sun, Moon, Plus, Play, Check, Loader2, ChevronLeft, ChevronRight,
   Quote, Sparkles, List, CheckCircle2, Clock,
   Zap, Coffee, Target, GraduationCap, BookOpen, Headphones,
-  Trophy, RotateCcw, Star, X, MessageCircle, Send, LineChart, UserRound,
+  Trophy, RotateCcw, Star, X, MessageCircle, Send, LineChart, UserRound, Trash2,
 } from "lucide-react";
 import { StructuredLecture } from "@/lib/agents/structurer";
 import { StudyMaterials } from "@/lib/agents/studyMaterialGenerator";
@@ -15,6 +15,8 @@ import { SearchResult } from "@/lib/agents/semanticSearch";
 import { LectureInsights } from "@/lib/agents/insights";
 import type { FacultyAuditReport } from "@/lib/agents/facultyAudit";
 import type { CurriculumMapReport } from "@/lib/agents/curriculumMap";
+import { Mascot } from "@/app/components/Mascot";
+import { celebrate } from "@/app/components/Confetti";
 
 interface ProcessResult {
   videoId: string;
@@ -27,6 +29,17 @@ interface ProcessResult {
 type PipelineStage = "idle" | "extracting" | "structuring" | "generating" | "complete" | "error";
 type DashTab = "summary" | "outline" | "flashcards" | "quiz" | "insights" | "chat" | "find";
 type AppMode = "student" | "faculty" | "provost";
+
+type Achievement = { id: string; title: string; desc: string };
+type LectureProgress = {
+  sectionsCompleted: number[];
+  cardsReviewed: number[];
+  chatUsed: boolean;
+  searchUsed: boolean;
+  quizScore: number | null;
+  focusSeconds: number;
+  achievements: Achievement[];
+};
 
 const EXAMPLE_URLS = [
   { label: "Karpathy: Build GPT from scratch", url: "https://youtube.com/watch?v=kCc8FmEb1nY" },
@@ -164,9 +177,51 @@ const LAST_SESSION_KEY = "studyai_last_session";
 const CREATOR_UNLOCK_KEY = "studyai_creator_unlocked";
 const FACULTY_CACHE_KEY = "studyai_faculty_cache";
 const PROVOST_CACHE_KEY = "studyai_provost_cache";
+const PROGRESS_PREFIX = "studyai_progress:";
 const MAX_SAVED = 10;
 /** Recents + last-session restore expire after 7 days */
 const TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
+const DEFAULT_PROGRESS: LectureProgress = {
+  sectionsCompleted: [],
+  cardsReviewed: [],
+  chatUsed: false,
+  searchUsed: false,
+  quizScore: null,
+  focusSeconds: 0,
+  achievements: [],
+};
+
+function uniq(nums: number[]) {
+  return Array.from(new Set(nums)).sort((a, b) => a - b);
+}
+
+function loadProgress(videoId: string): LectureProgress {
+  const key = `${PROGRESS_PREFIX}${videoId}`;
+  const raw = loadJson<LectureProgress>(key);
+  if (!raw) return DEFAULT_PROGRESS;
+  return {
+    ...DEFAULT_PROGRESS,
+    ...raw,
+    sectionsCompleted: uniq(Array.isArray(raw.sectionsCompleted) ? raw.sectionsCompleted : []),
+    cardsReviewed: uniq(Array.isArray((raw as any).cardsReviewed) ? (raw as any).cardsReviewed : []),
+    achievements: Array.isArray(raw.achievements) ? raw.achievements : [],
+    quizScore: typeof raw.quizScore === "number" ? raw.quizScore : null,
+    focusSeconds: typeof raw.focusSeconds === "number" ? raw.focusSeconds : 0,
+    chatUsed: Boolean(raw.chatUsed),
+    searchUsed: Boolean(raw.searchUsed),
+  };
+}
+
+function saveProgress(videoId: string, value: LectureProgress) {
+  const key = `${PROGRESS_PREFIX}${videoId}`;
+  saveJson(key, value);
+}
+
+function addAchievement(p: LectureProgress, a: Achievement): LectureProgress {
+  if (p.achievements.some((x) => x.id === a.id)) return p;
+  return { ...p, achievements: [a, ...p.achievements].slice(0, 20) };
+}
 
 function pruneExpired(entries: SavedLecture[]): SavedLecture[] {
   const now = Date.now();
@@ -303,6 +358,40 @@ export default function Home() {
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const progressRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
+  const [lectureProgress, setLectureProgress] = useState<LectureProgress>(DEFAULT_PROGRESS);
+  const ytPlayerRef = useRef<any>(null);
+  const ytPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const ytLastSectionRef = useRef<number>(-1);
+
+  useEffect(() => {
+    if (result?.videoId) setLectureProgress(loadProgress(result.videoId));
+  }, [result?.videoId]);
+
+  const updateLectureProgress = useCallback((patch: Partial<LectureProgress> | ((prev: LectureProgress) => LectureProgress)) => {
+    if (!result?.videoId) return;
+    setLectureProgress((prev) => {
+      const next = typeof patch === "function" ? patch(prev) : { ...prev, ...patch };
+      const normalized: LectureProgress = {
+        ...DEFAULT_PROGRESS,
+        ...next,
+        sectionsCompleted: uniq(next.sectionsCompleted ?? []),
+        achievements: Array.isArray(next.achievements) ? next.achievements : [],
+      };
+      saveProgress(result.videoId, normalized);
+      return normalized;
+    });
+  }, [result?.videoId]);
+
+  const markChapterVisited = useCallback((sectionIdx: number) => {
+    updateLectureProgress((p) => {
+      const before = p.sectionsCompleted.length;
+      const next = { ...p, sectionsCompleted: uniq([...p.sectionsCompleted, sectionIdx + 1]) };
+      if (before === 0) return addAchievement(next, { id: "first-jump", title: "First jump", desc: "You reached a chapter boundary." });
+      if (before < 5 && next.sectionsCompleted.length >= 5) return addAchievement(next, { id: "five-chapters", title: "Five chapters", desc: "You explored 5+ chapters." });
+      return next;
+    });
+  }, [updateLectureProgress]);
+
   const applyRestoredLecture = useCallback((lec: SavedLecture, tabOverride?: DashTab) => {
     setResult(lec.result);
     setStudyMaterials(lec.studyMaterials);
@@ -334,11 +423,10 @@ export default function Home() {
   }, [tryRestoreLastSession]);
 
   useEffect(() => {
-    try {
-      setCreatorUnlocked(localStorage.getItem(CREATOR_UNLOCK_KEY) === "1");
-    } catch {
-      setCreatorUnlocked(false);
-    }
+    // Always locked by default (demo guardrail).
+    // We intentionally do NOT persist unlock across sessions.
+    setCreatorUnlocked(false);
+    try { localStorage.removeItem(CREATOR_UNLOCK_KEY); } catch { /* ignore */ }
   }, []);
 
   // Restore last faculty/provost results for demo continuity (7-day TTL)
@@ -453,11 +541,94 @@ export default function Home() {
   }, [result, tryRestoreLastSession]);
 
   const seek = useCallback((seconds: number, sectionIdx?: number) => {
-    if (sectionIdx !== undefined) setActiveSection(sectionIdx);
-    if (iframeRef.current) {
-      iframeRef.current.src = `https://www.youtube.com/embed/${result?.videoId}?start=${Math.floor(seconds)}&autoplay=1&rel=0`;
+    if (sectionIdx !== undefined) {
+      setActiveSection(sectionIdx);
+      markChapterVisited(sectionIdx);
     }
-  }, [result?.videoId]);
+    // Prefer JS API seeks when available to avoid iframe reloads.
+    if (ytPlayerRef.current?.seekTo) {
+      ytPlayerRef.current.seekTo(Math.floor(seconds), true);
+      ytPlayerRef.current.playVideo?.();
+      return;
+    }
+    if (iframeRef.current) {
+      iframeRef.current.src = `https://www.youtube.com/embed/${result?.videoId}?start=${Math.floor(seconds)}&autoplay=1&rel=0&enablejsapi=1`;
+    }
+  }, [result?.videoId, markChapterVisited]);
+
+  // Auto-progress chapters while watching (YouTube IFrame API)
+  useEffect(() => {
+    if (appMode !== "student" || !result?.videoId || !result.lecture?.sections?.length) return;
+    const iframe = iframeRef.current;
+    if (!iframe) return;
+
+    let cancelled = false;
+
+    const ensureYouTubeApi = async () => {
+      if ((window as any).YT?.Player) return;
+      await new Promise<void>((resolve) => {
+        const existing = document.querySelector<HTMLScriptElement>("script[data-studyai-yt]");
+        if (existing) { existing.addEventListener("load", () => resolve(), { once: true }); return; }
+        const s = document.createElement("script");
+        s.src = "https://www.youtube.com/iframe_api";
+        s.async = true;
+        s.dataset.studyaiYt = "1";
+        s.onload = () => resolve();
+        document.head.appendChild(s);
+      });
+      // Wait until YT is ready
+      if ((window as any).YT?.Player) return;
+      await new Promise<void>((resolve) => {
+        (window as any).onYouTubeIframeAPIReady = () => resolve();
+      });
+    };
+
+    (async () => {
+      await ensureYouTubeApi();
+      if (cancelled) return;
+
+      // Attach a stable id for YT.Player
+      iframe.id = "studyai-player";
+
+      try {
+        ytPlayerRef.current?.destroy?.();
+      } catch { /* ignore */ }
+
+      ytPlayerRef.current = new (window as any).YT.Player("studyai-player", {
+        events: {
+          onReady: () => {
+            if (ytPollRef.current) clearInterval(ytPollRef.current);
+            ytLastSectionRef.current = -1;
+            ytPollRef.current = setInterval(() => {
+              try {
+                const t = Number(ytPlayerRef.current?.getCurrentTime?.() ?? 0);
+                const secs = Math.max(0, t);
+                const sections = result.lecture.sections;
+                let idx = 0;
+                for (let i = 0; i < sections.length; i++) {
+                  if (secs >= sections[i].startTime) idx = i;
+                  else break;
+                }
+                if (ytLastSectionRef.current !== idx) {
+                  ytLastSectionRef.current = idx;
+                  setActiveSection(idx);
+                  markChapterVisited(idx);
+                }
+              } catch { /* ignore */ }
+            }, 2500);
+          },
+        },
+      });
+    })();
+
+    return () => {
+      cancelled = true;
+      if (ytPollRef.current) { clearInterval(ytPollRef.current); ytPollRef.current = null; }
+      try { ytPlayerRef.current?.destroy?.(); } catch { /* ignore */ }
+      ytPlayerRef.current = null;
+      ytLastSectionRef.current = -1;
+    };
+  }, [appMode, result?.videoId, result?.lecture?.sections, markChapterVisited]);
 
   const startProgress = () => {
     setProgress(0);
@@ -518,6 +689,7 @@ export default function Home() {
       setStudyMaterials(data.studyMaterials);
       setChatHistory([]);
       setStage("complete");
+      celebrate();
       // Persist to localStorage
       const entry: SavedLecture = {
         id: data.videoId,
@@ -561,7 +733,6 @@ export default function Home() {
     }
     setUnlockError(null);
     setCreatorUnlocked(true);
-    try { localStorage.setItem(CREATOR_UNLOCK_KEY, "1"); } catch { /* ignore */ }
     setUnlockOpen(false);
     setUnlockCode("");
   };
@@ -677,7 +848,7 @@ export default function Home() {
 
   return (
     <div className={theme}>
-      <div className="flex min-h-screen" style={{ background: "var(--background)", color: "var(--foreground)" }}>
+      <div className="flex min-h-screen" style={{ color: "var(--foreground)" }}>
 
         {/* ── Left Sidebar (ChatGPT-style) ── */}
         {/* Overlay backdrop on mobile */}
@@ -763,19 +934,28 @@ export default function Home() {
                   </div>
                   {savedLectures.map((s) => (
                     <div key={s.id}
-                      className="group flex items-start gap-2 px-2 py-2.5 rounded-xl hover:opacity-80 transition cursor-pointer"
+                      className="group relative flex items-start gap-2.5 px-2.5 py-2 rounded-xl transition cursor-pointer"
                       style={{ background: result?.videoId === s.id ? "var(--surface-elevated)" : "transparent" }}
                       onClick={() => { loadFromHistory(s); setSidebarOpen(false); }}>
+                      <div className="h-8 w-12 rounded bg-border shrink-0 overflow-hidden">
+                        {/* prefer stored thumbnailUrl; fallback to i.yt */}
+                        <img
+                          src={s.thumbnailUrl || `https://i.ytimg.com/vi/${s.id}/mqdefault.jpg`}
+                          alt=""
+                          className="h-full w-full object-cover"
+                          loading="lazy"
+                        />
+                      </div>
                       <div className="flex-1 min-w-0">
-                        <p className="text-[13px] font-medium leading-tight truncate">{s.title}</p>
-                        <p className="text-[10px] mt-0.5 truncate" style={{ color: "var(--muted-foreground)" }}>
-                          {s.channelName} · {new Date(s.savedAt).toLocaleDateString()}
+                        <p className="text-[12px] leading-tight line-clamp-2" style={{ color: "color-mix(in oklab, var(--foreground) 90%, transparent)" }}>{s.title}</p>
+                        <p className="text-[10px] mt-0.5 truncate" style={{ color: "color-mix(in oklab, var(--muted-foreground) 75%, transparent)" }}>
+                          {s.channelName}
                         </p>
                       </div>
                       <button onClick={(e) => { e.stopPropagation(); deleteSavedLecture(s.id); setSavedLectures(loadSavedLectures()); }}
-                        className="opacity-0 group-hover:opacity-60 hover:!opacity-100 transition shrink-0 mt-0.5"
-                        style={{ color: "var(--muted-foreground)" }}>
-                        <X className="h-3 w-3" />
+                        className="absolute top-1.5 right-1.5 h-6 w-6 rounded-md flex items-center justify-center opacity-0 group-hover:opacity-60 hover:!opacity-100 transition"
+                        style={{ color: "var(--muted-foreground)", background: "transparent" }}>
+                        <Trash2 className="h-3.5 w-3.5" />
                       </button>
                     </div>
                   ))}
@@ -784,6 +964,18 @@ export default function Home() {
             </div>
             {/* Sidebar footer */}
             <div className="shrink-0 px-3 py-3 border-t" style={{ borderColor: "var(--border)" }}>
+              {lectureProgress.achievements.length > 0 && (
+                <div className="mb-2">
+                  <button
+                    onClick={() => { setSidebarOpen(false); if (result) setTab("summary"); }}
+                    className="w-full flex items-center gap-2 px-3 py-2 rounded-xl text-xs hover:opacity-80 transition"
+                    style={{ color: "var(--muted-foreground)", background: "var(--surface-elevated)" }}
+                  >
+                    <Trophy className="h-3.5 w-3.5" style={{ color: "var(--primary)" }} />
+                    {lectureProgress.achievements.length} achievement{lectureProgress.achievements.length === 1 ? "" : "s"}
+                  </button>
+                </div>
+              )}
               <button onClick={() => setTheme(t => t === "dark" ? "light" : "dark")}
                 className="w-full flex items-center gap-2 px-3 py-2.5 rounded-xl text-sm hover:opacity-80 transition"
                 style={{ color: "var(--muted-foreground)" }}>
@@ -843,45 +1035,80 @@ export default function Home() {
             <motion.main key="hero" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="flex-1">
               <div className="relative overflow-hidden">
                 <div className="absolute inset-0 -z-10">
-                  <div className="absolute inset-0 grid-pattern opacity-60" />
-                  <div className="absolute top-[-10%] right-[-5%] h-[500px] w-[500px] rounded-full blur-[120px] animate-float" style={{ background: "color-mix(in oklab, var(--primary) 12%, transparent)" }} />
-                  <div className="absolute bottom-[-10%] left-[-5%] h-[400px] w-[400px] rounded-full blur-[120px]" style={{ background: "color-mix(in oklab, var(--primary) 8%, transparent)", animation: "float 12s ease-in-out 4s infinite" }} />
+                  <div className="absolute inset-0 grid-pattern opacity-40" />
+                  <div className="absolute top-[-15%] right-[-8%] h-[520px] w-[520px] rounded-full blur-[140px] animate-float" style={{ background: "color-mix(in oklab, var(--primary) 15%, transparent)" }} />
+                  <div className="absolute bottom-[-10%] left-[-10%] h-[420px] w-[420px] rounded-full blur-[140px] animate-float" style={{ background: "color-mix(in oklab, var(--primary) 10%, transparent)", animationDelay: "5s" } as any} />
+                  {/* Network mesh overlay (Lovable-style) */}
+                  <svg className="absolute inset-0 w-full h-full opacity-70" viewBox="0 0 1200 700" preserveAspectRatio="none" aria-hidden="true">
+                    <defs>
+                      <linearGradient id="meshFade" x1="0" y1="0" x2="1" y2="1">
+                        <stop offset="0%" stopColor="transparent" />
+                        <stop offset="60%" stopColor="transparent" />
+                        <stop offset="100%" stopColor="var(--background)" stopOpacity="0.45" />
+                      </linearGradient>
+                    </defs>
+                    <g stroke="var(--foreground)" strokeOpacity="0.12" strokeWidth="1">
+                      <path d="M40 120 L180 80 L280 160 L160 240 Z" fill="none" />
+                      <path d="M820 90 L980 60 L1140 140 L980 220 Z" fill="none" />
+                      <path d="M980 420 L1120 360 L1180 500 L1040 560 Z" fill="none" />
+                      <path d="M120 520 L240 460 L360 560 L220 640 Z" fill="none" />
+                      <path d="M520 140 L640 90 L760 150 L640 220 Z" fill="none" />
+                      <path d="M520 420 L660 360 L820 440 L660 520 Z" fill="none" />
+                    </g>
+                    <g fill="var(--foreground)" fillOpacity="0.18">
+                      {[
+                        [180,80],[280,160],[160,240],[40,120],
+                        [980,60],[1140,140],[980,220],[820,90],
+                        [1120,360],[1180,500],[1040,560],[980,420],
+                        [240,460],[360,560],[220,640],[120,520],
+                        [640,90],[760,150],[640,220],[520,140],
+                        [660,360],[820,440],[660,520],[520,420],
+                      ].map(([x,y],i)=>(<circle key={i} cx={x} cy={y} r="2.4" />))}
+                    </g>
+                    <rect x="0" y="0" width="1200" height="700" fill="url(#meshFade)" />
+                  </svg>
                 </div>
 
-                {/* Hero section — full-width centered */}
-                <section className="mx-auto max-w-[1200px] px-4 sm:px-6 md:px-12 pt-12 sm:pt-20 md:pt-24 pb-16 sm:pb-24">
-                  <div className="text-center">
+                {/* Hero section — Lovable-style split hero */}
+                <section className="mx-auto max-w-[1280px] px-4 sm:px-6 md:px-10 pt-10 sm:pt-16 pb-16 sm:pb-20">
+                  <div className="grid grid-cols-12 gap-6 md:gap-10 items-end">
+                    <div className="col-span-12 lg:col-span-8 text-center lg:text-left">
                     <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.5 }}
-                      className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full border text-[10px] sm:text-[11px] font-mono uppercase tracking-[0.16em] mb-6 sm:mb-8" style={{ borderColor: "var(--border)", background: "var(--surface)", color: "var(--muted-foreground)" }}>
-                      <span className="h-1.5 w-1.5 rounded-full animate-pulse-soft" style={{ background: "var(--primary)" }} />
-                      Cloudforce Hackathon · Built on Bedrock
+                      className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full border text-[10px] sm:text-[11px] font-mono uppercase tracking-[0.18em] mb-6 sm:mb-7"
+                      style={{ borderColor: "var(--border)", background: "var(--surface)", color: "var(--muted-foreground)" }}>
+                      <Sparkles className="h-3.5 w-3.5" style={{ color: "var(--primary)" }} />
+                      A study companion, not a search engine
                     </motion.div>
 
                     <motion.h1 initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.7, delay: 0.05 }}
-                      className="font-serif leading-[0.95] tracking-[-0.025em] font-semibold mb-6 sm:mb-8 max-w-5xl mx-auto" style={{ fontSize: "clamp(2.4rem, 7vw, 5.5rem)" }}>
-                      Turn any YouTube lecture into your <em className="font-serif italic font-normal gradient-text">personal study workspace</em>.
+                      className="font-semibold tracking-[-0.03em] leading-[0.98] mb-6 sm:mb-7"
+                      style={{ fontSize: "clamp(2.4rem, 6.5vw, 5.25rem)" }}>
+                      Read every lecture<br />
+                      <span className="font-serif italic font-normal" style={{ color: "var(--muted-foreground)" }}>in the time it takes to</span>
+                      <br />make coffee.
                     </motion.h1>
 
                     <motion.p initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.6, delay: 0.18 }}
-                      className="text-base sm:text-lg md:text-xl leading-relaxed mb-8 sm:mb-12 max-w-2xl mx-auto px-2" style={{ color: "var(--muted-foreground)" }}>
-                      AI-powered summaries, flashcards, quiz, semantic search, and a lecture-aware chatbot — generated in under 30 seconds by parallel AI agents.
+                      className="text-base sm:text-lg leading-relaxed mb-8 sm:mb-10 max-w-xl mx-auto lg:mx-0 px-2 lg:px-0"
+                      style={{ color: "var(--muted-foreground)" }}>
+                      Paste a YouTube URL. Four AI agents extract, structure, and summarize the lecture into a calm, focused study workspace — with chat, flashcards, and semantic search built in.
                     </motion.p>
 
-                    <motion.form initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.6, delay: 0.3 }}
-                      onSubmit={(e) => { e.preventDefault(); submit(); }} className="max-w-2xl mx-auto">
-                      <div className="surface flex items-center gap-1.5 sm:gap-2 rounded-2xl p-1.5 sm:p-2 shadow-elegant relative">
+                    <motion.form initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.6, delay: 0.35 }}
+                      onSubmit={(e) => { e.preventDefault(); submit(); }} className="mt-10 max-w-2xl mx-auto lg:mx-0">
+                      <div className="surface flex items-center gap-2 rounded-2xl p-2 shadow-card relative transition"
+                        style={{ borderColor: "var(--border)" }}>
                         <div className="hidden sm:flex items-center gap-2 pl-3 pr-2 border-r shrink-0" style={{ borderColor: "var(--border)", color: "var(--muted-foreground)" }}>
                           <span className="font-mono text-xs uppercase tracking-wider">URL</span>
                         </div>
                         <input type="url" value={url} onChange={(e) => setUrl(e.target.value)}
-                          placeholder="Paste any YouTube lecture link…"
-                          className="flex-1 bg-transparent border-0 outline-none text-sm sm:text-base py-3 px-3 sm:px-2 min-w-0"
+                          placeholder="youtube.com/watch?v=..."
+                          className="flex-1 bg-transparent border-0 outline-none text-base py-2.5 px-3 min-w-0"
                           style={{ color: "var(--foreground)" }} autoFocus />
                         <button type="submit" disabled={!url.trim()}
-                          className="flex items-center gap-1.5 h-10 sm:h-11 px-4 sm:px-6 rounded-xl text-sm font-medium transition-all disabled:opacity-40 shrink-0 hover:opacity-90"
+                          className="flex items-center gap-1.5 h-11 px-5 rounded-xl text-sm font-medium transition-all disabled:opacity-40 shrink-0 hover:opacity-90"
                           style={{ background: "var(--foreground)", color: "var(--background)" }}>
-                          <span className="hidden sm:inline">Analyze</span>
-                          <ArrowRight className="h-4 w-4" />
+                          Build my study kit <ArrowRight className="h-4 w-4" />
                         </button>
                       </div>
                       <div className="flex flex-wrap items-center justify-center gap-2 mt-5">
@@ -896,20 +1123,42 @@ export default function Home() {
                       </div>
                     </motion.form>
 
-                    {/* Stats strip */}
-                    <motion.div initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.6, delay: 0.5 }}
-                      className="mt-12 sm:mt-16 grid grid-cols-2 sm:grid-cols-4 gap-3 sm:gap-6 max-w-3xl mx-auto">
-                      {[
-                        { v: "<30s", l: "End-to-end" },
-                        { v: "4", l: "AI agents" },
-                        { v: "12", l: "Languages" },
-                        { v: "100%", l: "Free to use" },
-                      ].map((s) => (
-                        <div key={s.l} className="text-center">
-                          <div className="font-serif text-2xl sm:text-3xl md:text-4xl tracking-tight" style={{ color: "var(--foreground)" }}>{s.v}</div>
-                          <div className="text-[10px] sm:text-xs font-mono uppercase tracking-wider mt-1" style={{ color: "var(--muted-foreground)" }}>{s.l}</div>
+                    <div className="mt-6 flex items-center justify-center lg:justify-start gap-4 text-xs" style={{ color: "color-mix(in oklab, var(--muted-foreground) 85%, transparent)" }}>
+                      <div className="flex items-center gap-1.5"><Zap className="h-3.5 w-3.5" style={{ color: "var(--primary)" }} /> ~30s avg build time</div>
+                      <div style={{ opacity: 0.3 }}>·</div>
+                      <div className="flex items-center gap-1.5"><BookOpen className="h-3.5 w-3.5" style={{ color: "var(--primary)" }} /> Works on captioned videos</div>
+                    </div>
+
+                    </div>
+
+                    {/* Mascot panel (desktop/tablet) */}
+                    <motion.div
+                      initial={{ opacity: 0, scale: 0.96 }}
+                      animate={{ opacity: 1, scale: 1 }}
+                      transition={{ duration: 0.7, delay: 0.3 }}
+                      className="hidden md:block col-span-12 lg:col-span-4 relative"
+                    >
+                      <div className="relative aspect-square max-w-[360px] ml-auto">
+                        <div className="absolute inset-4 rounded-[36px] gradient-warm opacity-20 blur-2xl" />
+                        <div className="relative h-full surface-elevated rounded-[28px] p-6 flex flex-col items-center justify-center overflow-hidden">
+                          <div className="absolute inset-0 dot-pattern opacity-50" />
+                          <Mascot className="relative h-48 w-48 animate-float" animated />
+                          <div className="relative mt-4 text-center">
+                            <div className="font-serif text-2xl">Hi, I&apos;m Owlbert.</div>
+                            <div className="text-xs mt-1" style={{ color: "var(--muted-foreground)" }}>
+                              I&apos;ll read the lecture so you can think about it.
+                            </div>
+                          </div>
                         </div>
-                      ))}
+                        <motion.div
+                          animate={{ y: [0, -8, 0] }}
+                          transition={{ duration: 4, repeat: Infinity, ease: "easeInOut" }}
+                          className="absolute -top-3 -left-3 surface-elevated rounded-xl px-3 py-2 shadow-card flex items-center gap-2"
+                        >
+                          <Sparkles className="h-3.5 w-3.5" style={{ color: "var(--primary)" }} />
+                          <span className="text-xs font-medium">4 agents · 1 workspace</span>
+                        </motion.div>
+                      </div>
                     </motion.div>
                   </div>
                 </section>
@@ -1174,6 +1423,11 @@ export default function Home() {
 
                   {/* Left: Chapter rail */}
                   <aside>
+                    <ProgressPanel
+                      lecture={result.lecture}
+                      materials={studyMaterials}
+                      progress={lectureProgress}
+                    />
                     <ChapterRail lecture={result.lecture} activeSection={activeSection} onSeek={seek} />
                   </aside>
 
@@ -1183,56 +1437,128 @@ export default function Home() {
                       className="aspect-video rounded-xl overflow-hidden border shadow-elegant"
                       style={{ borderColor: "var(--border)", background: "#000" }}>
                       <iframe ref={iframeRef}
-                        src={`https://www.youtube.com/embed/${result.videoId}?rel=0`}
+                        src={`https://www.youtube.com/embed/${result.videoId}?rel=0&enablejsapi=1&playsinline=1&origin=${encodeURIComponent(typeof window !== "undefined" ? window.location.origin : "")}`}
                         title={result.lecture.title}
                         allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
                         allowFullScreen className="w-full h-full" />
                     </motion.div>
 
-                    {/* Tab bar */}
-                    <div className="border-b flex gap-0 overflow-x-auto scrollbar-hide" style={{ borderColor: "var(--border)" }}>
-                      {([
-                        { id: "summary",    label: "Summary",    icon: FileText },
-                        { id: "outline",    label: "Outline",    icon: List },
-                        { id: "flashcards", label: "Flashcards", icon: Layers },
-                        { id: "quiz",       label: "Quiz",       icon: Trophy },
-                        { id: "insights",   label: "Insights",   icon: Brain },
-                        { id: "chat",       label: "Chat",       icon: MessageCircle },
-                        { id: "find",       label: "Find",       icon: Search },
-                        // translate tab hidden for v1 — focus on English quality
-                        // { id: "translate",  label: "Translate",  icon: Languages },
-                      ] as { id: DashTab; label: string; icon: typeof FileText }[]).map((t) => (
-                        <button key={t.id} onClick={() => setTab(t.id)}
-                          className="relative px-4 py-3 text-sm font-medium flex items-center gap-2 whitespace-nowrap transition-colors"
-                          style={{ color: tab === t.id ? "var(--foreground)" : "var(--muted-foreground)" }}>
-                          <t.icon className="h-3.5 w-3.5" strokeWidth={2} />
-                          {t.label}
-                          {tab === t.id && (
-                            <motion.div layoutId="tab-underline" className="absolute -bottom-px left-0 right-0 h-px"
-                              style={{ background: "var(--foreground)" }}
-                              transition={{ type: "spring", stiffness: 400, damping: 32 }} />
-                          )}
-                        </button>
-                      ))}
+                    {/* Tab bar (full-width) */}
+                    <div className="border-b" style={{ borderColor: "var(--border)" }}>
+                      <div className="hidden md:grid grid-cols-6">
+                        {([
+                          { id: "summary",    label: "Summary",    icon: FileText },
+                          { id: "flashcards", label: "Flashcards", icon: Layers },
+                          { id: "quiz",       label: "Quiz",       icon: Trophy },
+                          { id: "insights",   label: "Insights",   icon: Brain },
+                          { id: "chat",       label: "Chat",       icon: MessageCircle },
+                          { id: "find",       label: "Find",       icon: Search },
+                        ] as { id: DashTab; label: string; icon: typeof FileText }[]).map((t) => (
+                          <button
+                            key={t.id}
+                            onClick={() => setTab(t.id)}
+                            className="relative py-3 text-sm font-medium flex items-center justify-center gap-2 transition-colors"
+                            style={{ color: tab === t.id ? "var(--foreground)" : "var(--muted-foreground)" }}
+                          >
+                            <t.icon className="h-3.5 w-3.5" strokeWidth={2} />
+                            {t.label}
+                            {tab === t.id && (
+                              <motion.div
+                                layoutId="tab-underline"
+                                className="absolute -bottom-px left-6 right-6 h-px"
+                                style={{ background: "var(--foreground)" }}
+                                transition={{ type: "spring", stiffness: 400, damping: 32 }}
+                              />
+                            )}
+                          </button>
+                        ))}
+                      </div>
+
+                      {/* Mobile: keep scroll */}
+                      <div className="md:hidden flex gap-0 overflow-x-auto scrollbar-hide">
+                        {([
+                          { id: "summary",    label: "Summary",    icon: FileText },
+                          { id: "flashcards", label: "Flashcards", icon: Layers },
+                          { id: "quiz",       label: "Quiz",       icon: Trophy },
+                          { id: "insights",   label: "Insights",   icon: Brain },
+                          { id: "chat",       label: "Chat",       icon: MessageCircle },
+                          { id: "find",       label: "Find",       icon: Search },
+                        ] as { id: DashTab; label: string; icon: typeof FileText }[]).map((t) => (
+                          <button key={t.id} onClick={() => setTab(t.id)}
+                            className="relative px-4 py-3 text-sm font-medium flex items-center gap-2 whitespace-nowrap transition-colors"
+                            style={{ color: tab === t.id ? "var(--foreground)" : "var(--muted-foreground)" }}>
+                            <t.icon className="h-3.5 w-3.5" strokeWidth={2} />
+                            {t.label}
+                            {tab === t.id && (
+                              <motion.div layoutId="tab-underline-mobile" className="absolute -bottom-px left-0 right-0 h-px"
+                                style={{ background: "var(--foreground)" }}
+                                transition={{ type: "spring", stiffness: 400, damping: 32 }} />
+                            )}
+                          </button>
+                        ))}
+                      </div>
                     </div>
 
                     <div className="min-h-[400px]">
                       <AnimatePresence mode="wait">
                         <motion.div key={tab} initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -4 }} transition={{ duration: 0.18 }}>
                           {tab === "summary" && <SummaryTab materials={studyMaterials} />}
-                          {tab === "outline" && <OutlineTab lecture={result.lecture} activeSection={activeSection} onSeek={seek} />}
-                          {tab === "flashcards" && <FlashcardsTab materials={studyMaterials} onSeek={seek} />}
-                          {tab === "quiz" && <QuizTab materials={studyMaterials} />}
+                          {tab === "flashcards" && (
+                            <FlashcardsTab
+                              materials={studyMaterials}
+                              onSeek={seek}
+                              reviewed={lectureProgress.cardsReviewed}
+                              onReviewed={(idx) => {
+                                updateLectureProgress((p) => {
+                                  const next = { ...p, cardsReviewed: uniq([...p.cardsReviewed, idx]) };
+                                  if (next.cardsReviewed.length >= studyMaterials.flashcards.length && studyMaterials.flashcards.length > 0) {
+                                    celebrate();
+                                    return addAchievement(next, { id: "all-cards", title: "Card master", desc: "Reviewed every flashcard." });
+                                  }
+                                  if (next.cardsReviewed.length >= 3) {
+                                    return addAchievement(next, { id: "three-cards", title: "Recall mode", desc: "Reviewed 3 flashcards." });
+                                  }
+                                  return next;
+                                });
+                              }}
+                            />
+                          )}
+                          {tab === "quiz" && (
+                            <QuizTab
+                              materials={studyMaterials}
+                              onCompleted={(pct) => {
+                                updateLectureProgress((p) => {
+                                  const next = { ...p, quizScore: pct };
+                                  if (pct === 100) {
+                                    celebrate();
+                                    return addAchievement(next, { id: "perfect-quiz", title: "Perfect score", desc: "100% on the quiz." });
+                                  }
+                                  if (pct >= 70) return addAchievement(next, { id: "passed-quiz", title: "Concept solid", desc: "Passed the quiz." });
+                                  return next;
+                                });
+                              }}
+                            />
+                          )}
                           {tab === "insights" && <InsightsTab insights={result.insights} concepts={studyMaterials.concepts} onSeek={seek} />}
                           {tab === "chat" && (
-                            <ChatTab result={result} materials={studyMaterials}
+                            <ChatTab
+                              result={result}
+                              materials={studyMaterials}
                               initialHistory={chatHistory}
                               onHistoryChange={(h) => {
                                 setChatHistory(h);
                                 updateChatHistory(result.videoId, h);
-                              }} />
+                              }}
+                              onUsed={() => updateLectureProgress({ chatUsed: true })}
+                            />
                           )}
-                          {tab === "find" && <FindTab lecture={result.lecture} onSeek={seek} />}
+                          {tab === "find" && (
+                            <FindTab
+                              lecture={result.lecture}
+                              onSeek={seek}
+                              onUsed={() => updateLectureProgress({ searchUsed: true })}
+                            />
+                          )}
                           {/* translate tab removed for v1 */}
                         </motion.div>
                       </AnimatePresence>
@@ -1241,8 +1567,18 @@ export default function Home() {
 
                   {/* Right */}
                   <aside className="space-y-5 min-w-0">
+                    <NextBestActionPanel tab={tab} setTab={setTab} progress={lectureProgress} />
+                    <FocusBlockPanel
+                      progress={lectureProgress}
+                      onChange={(sec) => updateLectureProgress({ focusSeconds: sec })}
+                      onGoal={() => {
+                        updateLectureProgress((p) => addAchievement(p, { id: "first-focus", title: "First focus block", desc: "Completed a 25-minute study session." }));
+                        celebrate();
+                      }}
+                    />
                     <ConceptsPanel concepts={studyMaterials.concepts} />
                     <StatsPanel lecture={result.lecture} materials={studyMaterials} />
+                    <AchievementsPanel achievements={lectureProgress.achievements} />
                     {result.insights && (
                       <div className="surface rounded-xl p-4">
                         <div className="text-[10px] font-mono uppercase tracking-wider mb-2" style={{ color: "var(--muted-foreground)" }}>Difficulty</div>
@@ -1773,6 +2109,213 @@ function ConceptsPanel({ concepts }: { concepts: string[] }) {
   );
 }
 
+function ProgressPanel({
+  lecture,
+  materials,
+  progress,
+}: {
+  lecture: StructuredLecture;
+  materials: StudyMaterials;
+  progress: LectureProgress;
+}) {
+  const totalSections = lecture.sections.length || 1;
+  const totalCards = materials.flashcards.length || 1;
+  const sectionsPct = Math.round((progress.sectionsCompleted.length / totalSections) * 100);
+  const cardsPct = Math.round((progress.cardsReviewed.length / totalCards) * 100);
+  const overall = Math.round(
+    (sectionsPct + cardsPct + (progress.searchUsed ? 100 : 0) + (progress.chatUsed ? 100 : 0) + (progress.quizScore !== null ? 100 : 0)) / 5
+  );
+
+  return (
+    <div className="surface-elevated rounded-xl p-4 mb-5">
+      <div className="flex items-center justify-between mb-3">
+        <div className="text-[10px] font-mono uppercase tracking-[0.18em] flex items-center gap-2" style={{ color: "var(--muted-foreground)" }}>
+          <Target className="h-3 w-3" style={{ color: "var(--primary)" }} /> Lecture progress
+        </div>
+        <span className="font-serif text-xl tabular-nums">{overall}%</span>
+      </div>
+      <div className="h-1.5 bg-border rounded-full overflow-hidden mb-4">
+        <motion.div className="h-full gradient-warm" initial={{ width: 0 }} animate={{ width: `${overall}%` }} transition={{ duration: 0.6 }} />
+      </div>
+      <div className="space-y-2 text-xs">
+        <ProgressRow label="Chapters explored" value={`${progress.sectionsCompleted.length}/${totalSections}`} pct={sectionsPct} />
+        <ProgressRow label="Flashcards reviewed" value={`${progress.cardsReviewed.length}/${totalCards}`} pct={cardsPct} />
+        <ProgressRow label="Asked the chatbot" value={progress.chatUsed ? "✓" : "—"} pct={progress.chatUsed ? 100 : 0} />
+        <ProgressRow label="Used search" value={progress.searchUsed ? "✓" : "—"} pct={progress.searchUsed ? 100 : 0} />
+        <ProgressRow label="Quiz" value={progress.quizScore !== null ? `${progress.quizScore}%` : "—"} pct={progress.quizScore ?? 0} />
+      </div>
+    </div>
+  );
+}
+
+function ProgressRow({ label, value, pct }: { label: string; value: string; pct: number }) {
+  return (
+    <div className="flex items-center gap-3">
+      <span style={{ color: "color-mix(in oklab, var(--muted-foreground) 85%, transparent)" }} className="flex-1">
+        {label}
+      </span>
+      <span className="font-mono tabular-nums" style={{ color: "color-mix(in oklab, var(--foreground) 92%, transparent)" }}>
+        {value}
+      </span>
+      <div className="h-1 w-12 bg-border rounded-full overflow-hidden">
+        <div className="h-full" style={{ width: `${pct}%`, background: "var(--primary)" }} />
+      </div>
+    </div>
+  );
+}
+
+/* ─── Engagement panels (Lovable-style, minimal port) ─── */
+function NextBestActionPanel({
+  tab,
+  setTab,
+  progress,
+}: {
+  tab: DashTab;
+  setTab: (t: DashTab) => void;
+  progress: LectureProgress;
+}) {
+  const suggestion = useMemo(() => {
+    if (progress.sectionsCompleted.length === 0) return { tab: "outline" as DashTab, title: "Skim the outline", desc: "Get the lay of the land in 30 seconds." };
+    if (!progress.chatUsed) return { tab: "chat" as DashTab, title: "Ask Owlbert a question", desc: "The chatbot knows this lecture cold." };
+    if (progress.cardsReviewed.length < 3) return { tab: "flashcards" as DashTab, title: "Review 3 flashcards", desc: "Active recall locks in the concepts." };
+    if (progress.quizScore === null) return { tab: "quiz" as DashTab, title: "Take the quick quiz", desc: "A 2-minute check on what stuck." };
+    if (!progress.searchUsed) return { tab: "find" as DashTab, title: "Use semantic search", desc: "Find the exact moment a concept is explained." };
+    return { tab: "insights" as DashTab, title: "Scan the insights", desc: "Collect the key takeaways and next steps." };
+  }, [progress]);
+
+  if (suggestion.tab === tab) return null;
+
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: 8 }}
+      animate={{ opacity: 1, y: 0 }}
+      className="rounded-xl p-4 border relative overflow-hidden"
+      style={{
+        borderColor: "color-mix(in oklab, var(--primary) 35%, transparent)",
+        background: "color-mix(in oklab, var(--primary) 6%, transparent)",
+      }}
+    >
+      <div className="absolute -right-4 -bottom-4 opacity-15 pointer-events-none">
+        <Mascot className="h-24 w-24" />
+      </div>
+      <div className="text-[10px] font-mono uppercase tracking-[0.18em] mb-2 flex items-center gap-2" style={{ color: "var(--primary)" }}>
+        <Sparkles className="h-3 w-3" /> Next best action
+      </div>
+      <div className="font-serif text-lg leading-tight mb-1">{suggestion.title}</div>
+      <p className="text-xs mb-3 max-w-[220px]" style={{ color: "var(--muted-foreground)" }}>{suggestion.desc}</p>
+      <button
+        onClick={() => setTab(suggestion.tab)}
+        className="inline-flex items-center gap-2 px-3 py-2 rounded-lg text-xs font-medium hover:opacity-90 transition"
+        style={{ background: "var(--foreground)", color: "var(--background)" }}
+      >
+        Let&apos;s go <ChevronRight className="h-3 w-3" />
+      </button>
+    </motion.div>
+  );
+}
+
+function fmtClock(totalSeconds: number) {
+  const m = Math.floor(totalSeconds / 60);
+  const s = totalSeconds % 60;
+  return `${m}:${String(s).padStart(2, "0")}`;
+}
+
+function FocusBlockPanel({
+  progress,
+  onChange,
+  onGoal,
+}: {
+  progress: LectureProgress;
+  onChange: (seconds: number) => void;
+  onGoal: () => void;
+}) {
+  const goal = 25 * 60;
+  const [running, setRunning] = useState(false);
+
+  useEffect(() => {
+    if (!running) return;
+    const t = setInterval(() => onChange(progress.focusSeconds + 1), 1000);
+    return () => clearInterval(t);
+  }, [running, onChange, progress.focusSeconds]);
+
+  useEffect(() => {
+    if (progress.focusSeconds >= goal) {
+      setRunning(false);
+      onGoal();
+    }
+  }, [progress.focusSeconds, onGoal]);
+
+  const pct = Math.min(100, (progress.focusSeconds / goal) * 100);
+
+  return (
+    <div className="surface rounded-xl p-4">
+      <div className="flex items-center justify-between mb-3">
+        <div className="text-[10px] font-mono uppercase tracking-[0.18em]" style={{ color: "var(--muted-foreground)" }}>
+          Focus block
+        </div>
+        <span className="font-serif text-xl tabular-nums">{fmtClock(progress.focusSeconds)}</span>
+      </div>
+      <div className="h-1 bg-border rounded-full overflow-hidden mb-3">
+        <motion.div className="h-full" style={{ background: "var(--primary)" }} animate={{ width: `${pct}%` }} transition={{ duration: 0.25 }} />
+      </div>
+      <div className="flex items-center gap-2">
+        {!running ? (
+          <button
+            onClick={() => setRunning(true)}
+            className="flex-1 h-8 rounded-lg border text-xs font-medium hover:opacity-80 transition"
+            style={{ borderColor: "var(--border)", background: "var(--surface-elevated)" }}
+          >
+            Start
+          </button>
+        ) : (
+          <button
+            onClick={() => setRunning(false)}
+            className="flex-1 h-8 rounded-lg border text-xs font-medium hover:opacity-80 transition"
+            style={{ borderColor: "var(--border)", background: "var(--surface-elevated)" }}
+          >
+            Pause
+          </button>
+        )}
+        <button
+          onClick={() => { setRunning(false); onChange(0); }}
+          className="h-8 w-8 rounded-lg border hover:opacity-80 transition grid place-items-center"
+          style={{ borderColor: "var(--border)", background: "var(--surface-elevated)", color: "var(--muted-foreground)" }}
+          aria-label="Reset focus timer"
+        >
+          <RotateCcw className="h-3.5 w-3.5" />
+        </button>
+      </div>
+      <div className="text-[10px] mt-2 text-center" style={{ color: "color-mix(in oklab, var(--muted-foreground) 70%, transparent)" }}>
+        Goal: 25 min · then take a break
+      </div>
+    </div>
+  );
+}
+
+function AchievementsPanel({ achievements }: { achievements: Achievement[] }) {
+  if (!achievements || achievements.length === 0) return null;
+  return (
+    <div>
+      <div className="text-[11px] font-mono uppercase tracking-[0.18em] mb-3 flex items-center gap-2" style={{ color: "var(--muted-foreground)" }}>
+        <Trophy className="h-3 w-3" style={{ color: "var(--primary)" }} /> Achievements
+      </div>
+      <div className="space-y-1.5">
+        {achievements.slice(0, 4).map((a) => (
+          <div key={a.id} className="surface rounded-lg p-2.5 flex items-start gap-2">
+            <div className="h-7 w-7 rounded-md gradient-warm flex items-center justify-center shrink-0">
+              <Trophy className="h-3.5 w-3.5" style={{ color: "var(--primary-foreground)" }} />
+            </div>
+            <div>
+              <div className="text-xs font-medium leading-tight">{a.title}</div>
+              <div className="text-[10px] mt-0.5" style={{ color: "var(--muted-foreground)" }}>{a.desc}</div>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 /* ─── Summary Tab ─── */
 function SummaryTab({ materials }: { materials: StudyMaterials }) {
   const [mode, setMode] = useState<"short" | "medium" | "full">("medium");
@@ -1860,13 +2403,24 @@ function OutlineTab({ lecture, activeSection, onSeek }: { lecture: StructuredLec
 }
 
 /* ─── Flashcards Tab ─── */
-function FlashcardsTab({ materials, onSeek }: { materials: StudyMaterials; onSeek: (s: number) => void }) {
+function FlashcardsTab({
+  materials,
+  onSeek,
+  reviewed,
+  onReviewed,
+}: {
+  materials: StudyMaterials;
+  onSeek: (s: number) => void;
+  reviewed: number[];
+  onReviewed: (idx: number) => void;
+}) {
   const [idx, setIdx] = useState(0);
   const [flipped, setFlipped] = useState(false);
   const cards = materials.flashcards;
   const card = cards[idx];
   const total = cards.length;
   const nav = (dir: 1 | -1) => { setFlipped(false); setTimeout(() => setIdx((i) => (i + dir + total) % total), 120); };
+  const reviewedSet = useMemo(() => new Set(reviewed), [reviewed]);
 
   if (!card) return <div className="text-center py-16 text-sm" style={{ color: "var(--muted-foreground)" }}>No flashcards available.</div>;
 
@@ -1931,6 +2485,15 @@ function FlashcardsTab({ materials, onSeek }: { materials: StudyMaterials; onSee
           style={{ borderColor: "var(--border)", color: "var(--foreground)" }}>
           <ChevronLeft className="h-3.5 w-3.5" /> Prev
         </button>
+        {flipped && !reviewedSet.has(idx) && (
+          <button
+            onClick={(e) => { e.stopPropagation(); onReviewed(idx); nav(1); }}
+            className="px-4 py-2 rounded-lg text-sm font-medium transition hover:opacity-90"
+            style={{ background: "var(--foreground)", color: "var(--background)" }}
+          >
+            <Check className="h-4 w-4 inline-block mr-1.5" /> Got it
+          </button>
+        )}
         <button onClick={() => nav(1)} className="flex items-center gap-1.5 px-4 py-2 rounded-lg border text-sm transition hover:opacity-80"
           style={{ borderColor: "var(--border)", color: "var(--foreground)" }}>
           Next <ChevronRight className="h-3.5 w-3.5" />
@@ -1941,7 +2504,7 @@ function FlashcardsTab({ materials, onSeek }: { materials: StudyMaterials; onSee
 }
 
 /* ─── Find in Lecture Tab ─── */
-function FindTab({ lecture, onSeek }: { lecture: StructuredLecture; onSeek: (s: number) => void }) {
+function FindTab({ lecture, onSeek, onUsed }: { lecture: StructuredLecture; onSeek: (s: number) => void; onUsed: () => void }) {
   const [q, setQ] = useState("");
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<SearchResult | null>(null);
@@ -1962,7 +2525,10 @@ function FindTab({ lecture, onSeek }: { lecture: StructuredLecture; onSeek: (s: 
       });
       const data = await res.json();
       if (!res.ok) setError(data.error ?? "Search failed.");
-      else setResult(data);
+      else {
+        setResult(data);
+        onUsed();
+      }
     } catch { setError("Network error."); }
     finally { setLoading(false); }
   };
@@ -2049,7 +2615,7 @@ type QuizDifficulty = "easy" | "medium" | "hard";
 
 const QUIZ_Q_COUNT = 10; // quiz length is always 10, independent of flashcard count
 
-function QuizTab({ materials }: { materials: StudyMaterials }) {
+function QuizTab({ materials, onCompleted }: { materials: StudyMaterials; onCompleted: (pct: number) => void }) {
   const cards = useMemo(() => materials.flashcards.filter((c) => c.question && c.answer), [materials.flashcards]);
   const [difficulty, setDifficulty] = useState<QuizDifficulty | null>(null);
 
@@ -2094,6 +2660,13 @@ function QuizTab({ materials }: { materials: StudyMaterials }) {
   const [bestStreak, setBestStreak] = useState(0);
   const [done, setDone] = useState(false);
   const [results, setResults] = useState<boolean[]>([]);
+
+  const total = shuffledCards.length;
+  const pct = total > 0 ? Math.round((score / total) * 100) : 0;
+
+  useEffect(() => {
+    if (done) onCompleted(pct);
+  }, [done, pct, onCompleted]);
 
   useEffect(() => {
     if (!difficulty || !shuffledCards.length || qIdx >= shuffledCards.length) return;
@@ -2161,9 +2734,6 @@ function QuizTab({ materials }: { materials: StudyMaterials }) {
       </div>
     );
   }
-
-  const total = shuffledCards.length;
-  const pct = Math.round((score / total) * 100);
 
   // ── Result screen ──
   if (done) {
@@ -2711,11 +3281,12 @@ const STARTER_QUESTIONS = [
   "Give me a 30-second recap.",
 ];
 
-function ChatTab({ result, materials, initialHistory, onHistoryChange }: {
+function ChatTab({ result, materials, initialHistory, onHistoryChange, onUsed }: {
   result: ProcessResult;
   materials: StudyMaterials;
   initialHistory: ChatMessage[];
   onHistoryChange: (h: ChatMessage[]) => void;
+  onUsed: () => void;
 }) {
   const [messages, setMessages] = useState<ChatMessage[]>(initialHistory);
   const [input, setInput] = useState("");
@@ -2738,6 +3309,7 @@ function ChatTab({ result, materials, initialHistory, onHistoryChange }: {
   const send = async (text?: string) => {
     const q = (text ?? input).trim();
     if (!q || streaming) return;
+    onUsed();
     setInput("");
     const userMsg: ChatMessage = { role: "user", content: q };
     const history = [...messages, userMsg];
@@ -2797,9 +3369,13 @@ function ChatTab({ result, materials, initialHistory, onHistoryChange }: {
         {messages.length === 0 && (
           <div>
             <div className="text-center py-6">
-              <div className="text-3xl mb-3">👋</div>
-              <p className="text-sm font-medium mb-1">Ask me anything about this lecture</p>
-              <p className="text-xs" style={{ color: "var(--muted-foreground)" }}>I&apos;ve read the full transcript and can explain any concept.</p>
+              <div className="flex justify-center mb-3">
+                <Mascot className="h-20 w-20 animate-float" animated />
+              </div>
+              <p className="font-serif text-xl mb-1">Hi, I&apos;m Owlbert.</p>
+              <p className="text-sm" style={{ color: "var(--muted-foreground)" }}>
+                I&apos;ve read the full transcript. Ask anything — I&apos;ll explain it clearly and cite timestamps.
+              </p>
             </div>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
               {STARTER_QUESTIONS.map((q) => (
