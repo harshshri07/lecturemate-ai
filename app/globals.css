@@ -142,35 +142,9 @@
     text-rendering: optimizeLegibility;
   }
 
-  /* Cursor-follow glow (Lovable-style) */
-  body::before {
-    content: "";
-    position: fixed;
-    inset: 0;
-    pointer-events: none;
-    z-index: 0;
-    background:
-      radial-gradient(
-        circle 220px at var(--cursor-x) var(--cursor-y),
-        color-mix(in oklab, var(--primary) 16%, transparent) 0%,
-        transparent 65%
-      );
-    opacity: 0.75;
-    mix-blend-mode: screen;
-  }
-
   /* Gentle vignette + warm wash (prevents “flat black”) */
   body::after {
-    content: "";
-    position: fixed;
-    inset: 0;
-    pointer-events: none;
-    z-index: 0;
-    background:
-      radial-gradient(720px 520px at var(--blob1-x, 18%) var(--blob1-y, 22%), color-mix(in oklab, var(--primary) 10%, transparent) 0%, transparent 62%),
-      radial-gradient(620px 460px at var(--blob2-x, 78%) var(--blob2-y, 35%), color-mix(in oklab, var(--primary) 8%, transparent) 0%, transparent 66%),
-      radial-gradient(ellipse 90% 70% at center, transparent 55%, color-mix(in oklab, black 35%, transparent) 100%);
-    opacity: 0.85;
+    display: none;
   }
 
   /* Keep app content above overlays */
@@ -246,4 +220,7 @@
   }
   .scrollbar-hide { -ms-overflow-style: none; scrollbar-width: none; }
   .scrollbar-hide::-webkit-scrollbar { display: none; }
+
+  /* Prevent body scroll when a full-screen overlay (gate) is open */
+  body.gate-open { overflow: hidden; }
 }

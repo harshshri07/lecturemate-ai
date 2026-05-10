@@ -4,11 +4,14 @@ import React, { useState, useCallback, useRef, useEffect, useMemo } from "react"
 import { motion, AnimatePresence } from "framer-motion";
 import {
   ArrowRight, Brain, FileText, Search, Layers,
-  Sun, Moon, Plus, Play, Check, Loader2, ChevronLeft, ChevronRight,
+  Plus, Play, Check, Loader2, ChevronLeft, ChevronRight,
   Quote, Sparkles, List, CheckCircle2, Clock,
   Zap, Coffee, Target, GraduationCap, BookOpen, Headphones,
   Trophy, RotateCcw, Star, X, MessageCircle, Send, LineChart, UserRound, Trash2,
 } from "lucide-react";
+import { useSession } from "next-auth/react";
+import { signOut } from "next-auth/react";
+import Image from "next/image";
 import { StructuredLecture } from "@/lib/agents/structurer";
 import { StudyMaterials } from "@/lib/agents/studyMaterialGenerator";
 import { SearchResult } from "@/lib/agents/semanticSearch";
@@ -17,6 +20,23 @@ import type { FacultyAuditReport } from "@/lib/agents/facultyAudit";
 import type { CurriculumMapReport } from "@/lib/agents/curriculumMap";
 import { Mascot } from "@/app/components/Mascot";
 import { celebrate } from "@/app/components/Confetti";
+import { CheckInModal } from "@/app/components/CheckInModal";
+import { XPToastContainer, type XPToastItem } from "@/app/components/XPToast";
+import { SignInGate, shouldShowGate } from "@/app/components/SignInGate";
+import { AnimatedBackground } from "@/app/components/AnimatedBackground";
+import {
+  loadXPState, awardXP, getLevelInfo,
+  type XPState, type XPEvent,
+} from "@/app/lib/xp";
+import { canUseUrl } from "@/app/lib/guestSession";
+import {
+  type LearnerProfile,
+  type SkillLevel,
+  adaptLevel,
+  levelToTone,
+  loadLearnerProfile,
+  saveLearnerProfile,
+} from "@/app/lib/adaptLevel";
 
 interface ProcessResult {
   videoId: string;
@@ -37,6 +57,7 @@ type LectureProgress = {
   chatUsed: boolean;
   searchUsed: boolean;
   quizScore: number | null;
+  weakTopics?: string[];
   focusSeconds: number;
   achievements: Achievement[];
 };
@@ -62,9 +83,10 @@ function formatTime(sec: number) {
   return `${m}:${String(s).padStart(2, "0")}`;
 }
 
-/** Renders **bold** inline markdown — used in summary paragraphs */
+/** Renders **bold** inline markdown, used in summary paragraphs */
 function renderMarkdown(text: string) {
-  const parts = text.split(/(\*\*[^*]+\*\*)/g);
+  const sanitized = text.replace(/\u2014/g, ",").replace(/\u2013/g, "-");
+  const parts = sanitized.split(/(\*\*[^*]+\*\*)/g);
   return parts.map((chunk, i) =>
     chunk.startsWith("**") && chunk.endsWith("**")
       ? <strong key={i} style={{ color: "var(--foreground)", fontWeight: 600 }}>{chunk.slice(2, -2)}</strong>
@@ -74,7 +96,8 @@ function renderMarkdown(text: string) {
 
 /** Renders inline markdown: ***bi***, **bold**, *italic*, `code` */
 function renderInline(text: string, key?: string): React.ReactNode {
-  const parts = text.split(/(\*\*\*[^*]+\*\*\*|\*\*[^*]+\*\*|\*[^*]+\*|`[^`]+`)/g);
+  const clean = text.replace(/\u2014/g, ",").replace(/\u2013/g, "-");
+  const parts = clean.split(/(\*\*\*[^*]+\*\*\*|\*\*[^*]+\*\*|\*[^*]+\*|`[^`]+`)/g);
   return parts.map((chunk, i) => {
     const k = `${key ?? ""}-${i}`;
     if (chunk.startsWith("***") && chunk.endsWith("***")) return <strong key={k}><em>{chunk.slice(3, -3)}</em></strong>;
@@ -91,7 +114,7 @@ function renderInline(text: string, key?: string): React.ReactNode {
 
 /** Full block + inline markdown renderer for chat messages */
 function renderChatMarkdown(text: string): React.ReactNode {
-  const lines = text.split("\n");
+  const lines = text.replace(/\u2014/g, ",").replace(/\u2013/g, "-").split("\n");
   const nodes: React.ReactNode[] = [];
   let i = 0;
   while (i < lines.length) {
@@ -196,6 +219,13 @@ function uniq(nums: number[]) {
   return Array.from(new Set(nums)).sort((a, b) => a - b);
 }
 
+/** Seconds of active playback required in a section before it counts as "watched" for chapter XP. */
+function sectionWatchThresholdSec(sections: { startTime: number; endTime: number }[], i: number): number {
+  const s = sections[i];
+  const len = Math.max(1, s.endTime - s.startTime);
+  return Math.min(len * 0.9, Math.max(12, len * 0.32));
+}
+
 function loadProgress(videoId: string): LectureProgress {
   const key = `${PROGRESS_PREFIX}${videoId}`;
   const raw = loadJson<LectureProgress>(key);
@@ -230,12 +260,12 @@ function pruneExpired(entries: SavedLecture[]): SavedLecture[] {
 
 function pickQuote(mode: AppMode) {
   const student = [
-    "You don't learn by watching — you learn by retrieving.",
+    "You don't learn by watching. You learn by retrieving.",
     "Small summaries. Big understanding.",
     "Clarity beats speed; focus beats noise.",
     "Turn any lecture into your personal workspace.",
     "The best review session is the one you actually do.",
-    "Understanding compounds — start with the outline.",
+    "Understanding compounds. Start with the outline.",
     "Flash cards beat re-reading. Every time.",
     "One lecture, well processed, beats ten skimmed.",
     "Learn it once, recall it forever.",
@@ -246,9 +276,9 @@ function pickQuote(mode: AppMode) {
     "Signpost. Define. Recap. Publish.",
     "One improvement can double student clarity.",
     "Teach the structure, not just the content.",
-    "Clear outcomes make great lectures — and vice versa.",
+    "Clear outcomes make great lectures, and vice versa.",
     "Explicit transitions: invisible when they work, priceless when missing.",
-    "Accessibility is not an afterthought — it is the foundation.",
+    "Accessibility is not an afterthought. It is the foundation.",
     "The best lecturers edit as obsessively as writers do.",
     "Equity in the classroom starts with equity in the explanation.",
     "What your students remember most is what you emphasised last.",
@@ -258,7 +288,7 @@ function pickQuote(mode: AppMode) {
     "What's taught matters more than what's planned.",
     "Map the course. Find the gaps. Fix them.",
     "Quality assurance, grounded in real transcripts.",
-    "Curriculum coherence isn't accidental — it's designed.",
+    "Curriculum coherence isn't accidental. It's designed.",
     "Redundancy wastes time; gaps lose students. Find both.",
     "Evidence-based curriculum review beats intuition.",
     "Where objectives meet content, learning happens.",
@@ -324,20 +354,156 @@ function persistLastSession(videoId: string | null, tab: DashTab, mode: AppMode)
 }
 // ────────────────────────────────────────────────────────────────────────
 
+// ── HeaderUserArea ────────────────────────────────────────────────────────
+// Shows user avatar + name (signed-in) OR a compact "Sign in" button (guest).
+function HeaderUserArea({ session, onSignOut, onShowGate }: { session: ReturnType<typeof useSession>["data"]; onSignOut: () => void; onShowGate: () => void }) {
+  const [open, setOpen] = React.useState(false);
+  if (!session) {
+    return (
+      <button
+        onClick={onShowGate}
+        className="ml-1 flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium transition hover:opacity-80"
+        style={{
+          background: "color-mix(in oklab, var(--primary) 14%, transparent)",
+          color: "var(--primary)",
+          border: "1px solid color-mix(in oklab, var(--primary) 28%, transparent)",
+        }}
+      >
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" className="shrink-0">
+          <path d="M15.5 13h-7a.5.5 0 0 1 0-1h7a.5.5 0 0 1 0 1z" />
+          <path d="M5 3a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V5a2 2 0 0 0-2-2H5zm0 1h14a1 1 0 0 1 1 1v14a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1z" />
+          <path d="M12 8.5v7a.5.5 0 0 1-1 0v-7a.5.5 0 0 1 1 0z" />
+        </svg>
+        <span className="hidden sm:inline">Sign in</span>
+      </button>
+    );
+  }
+  return (
+    <div className="relative ml-1">
+      <button
+        onClick={() => setOpen((o) => !o)}
+        className="flex items-center gap-2 h-8 px-2 rounded-lg transition hover:opacity-80"
+        style={{ background: "var(--surface-elevated)", border: "1px solid var(--border)" }}
+        title={session.user.name ?? session.user.email ?? "Account"}
+      >
+        {session.user.image ? (
+          <Image src={session.user.image} alt="" width={22} height={22} className="rounded-full object-cover" />
+        ) : (
+          <div className="h-[22px] w-[22px] rounded-full flex items-center justify-center text-[11px] font-bold"
+            style={{ background: "var(--primary)", color: "var(--primary-foreground)" }}>
+            {(session.user.name ?? session.user.email ?? "?")[0].toUpperCase()}
+          </div>
+        )}
+        <span className="hidden sm:block text-xs font-medium max-w-[90px] truncate" style={{ color: "var(--foreground)" }}>
+          {session.user.name?.split(" ")[0] ?? session.user.email}
+        </span>
+      </button>
+
+      <AnimatePresence>
+        {open && (
+          <>
+            <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95, y: -4 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: -4 }}
+              transition={{ duration: 0.15 }}
+              className="absolute right-0 top-10 z-50 w-52 rounded-xl p-1 shadow-2xl"
+              style={{ background: "var(--surface)", border: "1px solid var(--border)" }}
+            >
+              <div className="px-3 py-2.5 border-b" style={{ borderColor: "var(--border)" }}>
+                <p className="text-xs font-semibold truncate" style={{ color: "var(--foreground)" }}>
+                  {session.user.name}
+                </p>
+                <p className="text-[11px] truncate" style={{ color: "var(--muted-foreground)" }}>
+                  {session.user.email}
+                </p>
+              </div>
+              <div className="flex items-center gap-2 px-3 py-2">
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="shrink-0" style={{ color: "oklch(0.7 0.18 145)" }}>
+                  <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07A19.5 19.5 0 0 1 4.69 10a19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 3.6 0h3a2 2 0 0 1 2 1.72c.127.96.361 1.903.7 2.81a2 2 0 0 1-.45 2.11L8.09 7.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.907.339 1.85.573 2.81.7A2 2 0 0 1 22 16.92z" />
+                </svg>
+                <span className="text-xs" style={{ color: "var(--muted-foreground)" }}>Cloud sync enabled</span>
+              </div>
+              <button
+                onClick={() => { setOpen(false); onSignOut(); }}
+                className="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm transition hover:opacity-70"
+                style={{ color: "var(--destructive)" }}
+              >
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" /><polyline points="16 17 21 12 16 7" /><line x1="21" y1="12" x2="9" y2="12" />
+                </svg>
+                Sign out
+              </button>
+            </motion.div>
+          </>
+        )}
+      </AnimatePresence>
+    </div>
+  );
+}
+
 export default function Home() {
+  const { data: session, status: sessionStatus } = useSession();
+  const isSignedIn = !!session?.user?.id;
+  const userId = session?.user?.id ?? null;
+
+  // ── Gate state: "loading" → prevents ANY flash of hero or gate ──────────
+  // "loading"  — session unknown; show neutral blank screen (no flash)
+  // "gate"     — show the sign-in / guest picker
+  // "app"      — skip gate, go straight to the app
+  const [gateState, setGateState] = useState<"loading" | "gate" | "app">("loading");
+
+  useEffect(() => {
+    // Check localStorage immediately (synchronous) — fastest path
+    const guestConfirmed = (() => {
+      try { return !!localStorage.getItem("studyai_guest_confirmed"); } catch { return false; }
+    })();
+
+    if (isSignedIn || guestConfirmed) {
+      setGateState("app");
+    } else if (sessionStatus !== "loading") {
+      // Session resolved + not signed in + no guest flag → show gate
+      setGateState("gate");
+    }
+    // While sessionStatus === "loading" we keep gateState = "loading"
+    // (blank screen, no content rendered) to avoid any flash
+  }, [sessionStatus, isSignedIn]);
+
   const [url, setUrl] = useState("");
   const [stage, setStage] = useState<PipelineStage>("idle");
   const [error, setError] = useState<string | null>(null);
+  const [urlWarning, setUrlWarning] = useState<string | null>(null);
   const [result, setResult] = useState<ProcessResult | null>(null);
   const [studyMaterials, setStudyMaterials] = useState<StudyMaterials | null>(null);
   const [tab, setTab] = useState<DashTab>("summary");
-  const [theme, setTheme] = useState<"dark" | "light">("dark");
+  const theme = "dark"; // Always dark mode
   const [progress, setProgress] = useState(0);
   const [stepIdx, setStepIdx] = useState(0);
   const [activeSection, setActiveSection] = useState(0);
   const [savedLectures, setSavedLectures] = useState<SavedLecture[]>([]);
   const [chatHistory, setChatHistory] = useState<ChatMessage[]>([]);
   const [sidebarOpen, setSidebarOpen] = useState(false);
+
+  // ── XP / gamification ──────────────────────────────────────────────────────
+  const [xpState, setXpState] = useState<XPState>(() => loadXPState());
+  const [xpToasts, setXpToasts] = useState<XPToastItem[]>([]);
+
+  const xpStateRef = useRef<XPState>(xpState);
+  xpStateRef.current = xpState;
+
+  const giveXP = useCallback((event: XPEvent, opts?: { quizScore?: number; label?: string }) => {
+    const prev = xpStateRef.current;
+    const { newState, xpGained } = awardXP(prev, event, { quizScore: opts?.quizScore });
+    if (xpGained > 0) {
+      setXpState(newState);
+      const toastLabel = opts?.label ?? event.replace(/([A-Z])/g, " $1").toLowerCase();
+      const id = `${event}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      setXpToasts((t) => [...t, { id, amount: xpGained, label: toastLabel }]);
+    } else {
+      setXpState(newState);
+    }
+  }, []);
   const [appMode, setAppMode] = useState<AppMode>("student");
   const [creatorUnlocked, setCreatorUnlocked] = useState(false);
   const [unlockOpen, setUnlockOpen] = useState(false);
@@ -355,17 +521,59 @@ export default function Home() {
   const [provostReport, setProvostReport] = useState<CurriculumMapReport | null>(null);
   const [provostPerVideo, setProvostPerVideo] = useState<{ videoId: string; url: string; metadata?: { title: string; channelName: string }; error?: string }[] | null>(null);
   const [loadingQuote, setLoadingQuote] = useState(() => pickQuote("student"));
-  const iframeRef = useRef<HTMLIFrameElement>(null);
+  const iframeRef = useRef<HTMLDivElement>(null);
   const progressRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // ── Learner profile (adaptive learning) ─────────────────────────────────
+  const [learnerProfile, setLearnerProfile] = useState<LearnerProfile | null>(null);
+  const [checkInOpen, setCheckInOpen] = useState(false);
+
+  /** Tracks whether we've already pushed localStorage data up to Supabase this session */
+  const hasMergedToCloudRef = useRef(false);
 
   const [lectureProgress, setLectureProgress] = useState<LectureProgress>(DEFAULT_PROGRESS);
   const ytPlayerRef = useRef<any>(null);
   const ytPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const ytLastSectionRef = useRef<number>(-1);
+  const ytLastPollAtRef = useRef<number>(0);
+  const sectionWatchAccumRef = useRef<Record<number, number>>({});
+  const resultRef = useRef<ProcessResult | null>(null);
+  const lectureProgressRef = useRef<LectureProgress>(DEFAULT_PROGRESS);
 
   useEffect(() => {
-    if (result?.videoId) setLectureProgress(loadProgress(result.videoId));
-  }, [result?.videoId]);
+    if (!result?.videoId) return;
+    const videoId = result.videoId;
+    if (isSignedIn) {
+      // Load from Supabase when signed in
+      fetch(`/api/lecture-progress?videoId=${encodeURIComponent(videoId)}`)
+        .then((r) => (r.ok ? r.json() : null))
+        .then((data) => {
+          if (data) {
+            setLectureProgress({
+              ...DEFAULT_PROGRESS,
+              ...(data as Partial<LectureProgress>),
+              sectionsCompleted: uniq(Array.isArray(data.sectionsCompleted) ? data.sectionsCompleted : []),
+              achievements: Array.isArray(data.achievements) ? data.achievements : [],
+            });
+          } else {
+            // Fall back to localStorage if not in DB yet
+            setLectureProgress(loadProgress(videoId));
+          }
+        })
+        .catch(() => setLectureProgress(loadProgress(videoId)));
+    } else {
+      setLectureProgress(loadProgress(videoId));
+    }
+  }, [result?.videoId, isSignedIn]);
+
+  // Keep refs in sync with state for use in intervals/callbacks
+  useEffect(() => {
+    resultRef.current = result;
+  }, [result]);
+
+  useEffect(() => {
+    lectureProgressRef.current = lectureProgress;
+  }, [lectureProgress]);
 
   const updateLectureProgress = useCallback((patch: Partial<LectureProgress> | ((prev: LectureProgress) => LectureProgress)) => {
     if (!result?.videoId) return;
@@ -377,20 +585,46 @@ export default function Home() {
         sectionsCompleted: uniq(next.sectionsCompleted ?? []),
         achievements: Array.isArray(next.achievements) ? next.achievements : [],
       };
+      // Always save to localStorage as local cache
       saveProgress(result.videoId, normalized);
+      // Also sync to Supabase when signed in (fire-and-forget)
+      if (isSignedIn) {
+        fetch("/api/lecture-progress", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ videoId: result.videoId, data: normalized }),
+        }).catch(() => { /* non-critical */ });
+      }
       return normalized;
     });
+  }, [result?.videoId, isSignedIn]);
+
+  const xpAwardedChaptersRef = useRef<Set<number>>(new Set());
+
+  useEffect(() => {
+    if (!result?.videoId) return;
+    sectionWatchAccumRef.current = {};
+    ytLastPollAtRef.current = 0;
   }, [result?.videoId]);
 
+  useEffect(() => {
+    if (!result?.videoId) return;
+    xpAwardedChaptersRef.current = new Set(lectureProgress.sectionsCompleted);
+  }, [result?.videoId, lectureProgress.sectionsCompleted]);
+
   const markChapterVisited = useCallback((sectionIdx: number) => {
+    const chapterNum = sectionIdx + 1;
+    if (xpAwardedChaptersRef.current.has(chapterNum)) return;
+    xpAwardedChaptersRef.current.add(chapterNum);
+    giveXP("exploreChapter", { label: `Explored chapter ${String(chapterNum).padStart(2, "0")}` });
     updateLectureProgress((p) => {
       const before = p.sectionsCompleted.length;
-      const next = { ...p, sectionsCompleted: uniq([...p.sectionsCompleted, sectionIdx + 1]) };
-      if (before === 0) return addAchievement(next, { id: "first-jump", title: "First jump", desc: "You reached a chapter boundary." });
+      const next = { ...p, sectionsCompleted: uniq([...p.sectionsCompleted, chapterNum]) };
+      if (before === 0) return addAchievement(next, { id: "first-jump", title: "First chapter", desc: "You finished a chapter while watching." });
       if (before < 5 && next.sectionsCompleted.length >= 5) return addAchievement(next, { id: "five-chapters", title: "Five chapters", desc: "You explored 5+ chapters." });
       return next;
     });
-  }, [updateLectureProgress]);
+  }, [updateLectureProgress, giveXP]);
 
   const applyRestoredLecture = useCallback((lec: SavedLecture, tabOverride?: DashTab) => {
     setResult(lec.result);
@@ -419,8 +653,57 @@ export default function Home() {
 
   // Load saved lectures + restore last student session (back/forward, refresh)
   useEffect(() => {
-    tryRestoreLastSession();
-  }, [tryRestoreLastSession]);
+    if (isSignedIn) {
+      // Load from Supabase when authenticated
+      fetch("/api/saved-lectures")
+        .then((r) => (r.ok ? r.json() : []))
+        .then((lectures) => {
+          setSavedLectures(lectures as SavedLecture[]);
+        })
+        .catch(() => {
+          // Fallback to localStorage
+          setSavedLectures(loadSavedLectures());
+        });
+    } else {
+      tryRestoreLastSession();
+    }
+  }, [isSignedIn, tryRestoreLastSession]);
+
+  // One-time migration: push localStorage data to Supabase when user first signs in
+  useEffect(() => {
+    if (!isSignedIn || hasMergedToCloudRef.current) return;
+    hasMergedToCloudRef.current = true;
+
+    const localLectures = loadSavedLectures();
+    if (localLectures.length === 0) return;
+
+    // Push each local lecture to Supabase (fire-and-forget)
+    localLectures.forEach((lec) => {
+      fetch("/api/saved-lectures", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          id:             lec.id,
+          title:          lec.title,
+          channelName:    lec.channelName,
+          thumbnailUrl:   lec.thumbnailUrl,
+          result:         lec.result,
+          studyMaterials: lec.studyMaterials,
+          chatHistory:    lec.chatHistory ?? [],
+        }),
+      }).catch(() => { /* non-critical */ });
+    });
+
+    // Also push local profile if present
+    const localProfile = loadLearnerProfile();
+    if (localProfile.quizHistory.length > 0 || localProfile.checkedInLectures.length > 0) {
+      fetch("/api/learner-profile", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(localProfile),
+      }).catch(() => { /* non-critical */ });
+    }
+  }, [isSignedIn]);
 
   useEffect(() => {
     // Always locked by default (demo guardrail).
@@ -428,6 +711,27 @@ export default function Home() {
     setCreatorUnlocked(false);
     try { localStorage.removeItem(CREATOR_UNLOCK_KEY); } catch { /* ignore */ }
   }, []);
+
+  // Load learner profile on mount (or when sign-in state changes)
+  useEffect(() => {
+    if (isSignedIn) {
+      // Try loading from Supabase first
+      fetch("/api/learner-profile")
+        .then((r) => (r.ok ? r.json() : null))
+        .then((cloudProfile) => {
+          if (cloudProfile && !cloudProfile.error) {
+            setLearnerProfile(cloudProfile as LearnerProfile);
+          } else {
+            // No cloud profile yet — use local and it will be synced on first write
+            const local = loadLearnerProfile();
+            setLearnerProfile(local);
+          }
+        })
+        .catch(() => setLearnerProfile(loadLearnerProfile()));
+    } else {
+      setLearnerProfile(loadLearnerProfile());
+    }
+  }, [isSignedIn]);
 
   // Restore last faculty/provost results for demo continuity (7-day TTL)
   useEffect(() => {
@@ -540,95 +844,228 @@ export default function Home() {
     return () => window.removeEventListener("popstate", onPop);
   }, [result, tryRestoreLastSession]);
 
+  // ── Learner profile helpers ──────────────────────────────────────────────
+
+  const syncProfileToBackend = useCallback(async (profile: LearnerProfile) => {
+    try {
+      await fetch("/api/learner-profile", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(profile),
+      });
+    } catch { /* non-critical — localStorage is the source of truth */ }
+  }, []);
+
+  const handleCheckInDone = useCallback(
+    (checkResult: { score: number; level: SkillLevel }) => {
+      setCheckInOpen(false);
+      setLearnerProfile((prev) => {
+        const base = prev ?? loadLearnerProfile();
+        const videoId = result?.videoId ?? "";
+        const historyEntry = {
+          videoId,
+          score: checkResult.score,
+          level: checkResult.level,
+          timestamp: Date.now(),
+        };
+        const updated: LearnerProfile = {
+          ...base,
+          overallLevel: adaptLevel(base, checkResult.score),
+          chatTone: levelToTone(adaptLevel(base, checkResult.score)),
+          quizHistory: [historyEntry, ...base.quizHistory].slice(0, 50),
+          checkedInLectures: Array.from(new Set([...base.checkedInLectures, videoId])),
+        };
+        saveLearnerProfile(updated);
+        syncProfileToBackend(updated);
+        return updated;
+      });
+    },
+    [result?.videoId, syncProfileToBackend]
+  );
+
+  const handleCheckInSkip = useCallback(() => {
+    setCheckInOpen(false);
+    if (!result?.videoId) return;
+    const videoId = result.videoId;
+    setLearnerProfile((prev) => {
+      const base = prev ?? loadLearnerProfile();
+      const updated: LearnerProfile = {
+        ...base,
+        checkedInLectures: Array.from(new Set([...base.checkedInLectures, videoId])),
+      };
+      saveLearnerProfile(updated);
+      return updated;
+    });
+  }, [result?.videoId]);
+
   const seek = useCallback((seconds: number, sectionIdx?: number) => {
-    if (sectionIdx !== undefined) {
-      setActiveSection(sectionIdx);
-      markChapterVisited(sectionIdx);
-    }
-    // Prefer JS API seeks when available to avoid iframe reloads.
+    if (sectionIdx !== undefined) setActiveSection(sectionIdx);
     if (ytPlayerRef.current?.seekTo) {
       ytPlayerRef.current.seekTo(Math.floor(seconds), true);
       ytPlayerRef.current.playVideo?.();
-      return;
     }
-    if (iframeRef.current) {
-      iframeRef.current.src = `https://www.youtube.com/embed/${result?.videoId}?start=${Math.floor(seconds)}&autoplay=1&rel=0&enablejsapi=1`;
-    }
-  }, [result?.videoId, markChapterVisited]);
+  }, []);
 
-  // Auto-progress chapters while watching (YouTube IFrame API)
+  // Auto-progress chapters while watching (YouTube IFrame Player API)
+  const updateLectureProgressRef = useRef(updateLectureProgress);
+  updateLectureProgressRef.current = updateLectureProgress;
+  const markChapterVisitedRef = useRef(markChapterVisited);
+  markChapterVisitedRef.current = markChapterVisited;
+
   useEffect(() => {
-    if (appMode !== "student" || !result?.videoId || !result.lecture?.sections?.length) return;
-    const iframe = iframeRef.current;
-    if (!iframe) return;
+    if (appMode !== "student" || !result?.videoId) return;
 
     let cancelled = false;
+    let pollInterval: ReturnType<typeof setInterval> | null = null;
 
-    const ensureYouTubeApi = async () => {
-      if ((window as any).YT?.Player) return;
-      await new Promise<void>((resolve) => {
-        const existing = document.querySelector<HTMLScriptElement>("script[data-studyai-yt]");
-        if (existing) { existing.addEventListener("load", () => resolve(), { once: true }); return; }
-        const s = document.createElement("script");
-        s.src = "https://www.youtube.com/iframe_api";
-        s.async = true;
-        s.dataset.studyaiYt = "1";
-        s.onload = () => resolve();
-        document.head.appendChild(s);
-      });
-      // Wait until YT is ready
-      if ((window as any).YT?.Player) return;
-      await new Promise<void>((resolve) => {
-        (window as any).onYouTubeIframeAPIReady = () => resolve();
-      });
-    };
-
-    (async () => {
-      await ensureYouTubeApi();
+    const initPlayer = () => {
       if (cancelled) return;
 
-      // Attach a stable id for YT.Player
-      iframe.id = "studyai-player";
+      // Wait for DOM element to exist
+      const el = document.getElementById("studyai-yt-player");
+      if (!el) {
+        // Retry after a short delay - the div might not be rendered yet
+        setTimeout(() => { if (!cancelled) initPlayer(); }, 300);
+        return;
+      }
 
       try {
         ytPlayerRef.current?.destroy?.();
       } catch { /* ignore */ }
 
-      ytPlayerRef.current = new (window as any).YT.Player("studyai-player", {
+      ytPlayerRef.current = new (window as any).YT.Player("studyai-yt-player", {
+        videoId: result.videoId,
+        width: "100%",
+        height: "100%",
+        playerVars: {
+          rel: 0,
+          enablejsapi: 1,
+          playsinline: 1,
+          modestbranding: 1,
+        },
         events: {
           onReady: () => {
-            if (ytPollRef.current) clearInterval(ytPollRef.current);
+            if (cancelled) return;
             ytLastSectionRef.current = -1;
-            ytPollRef.current = setInterval(() => {
+            ytLastPollAtRef.current = Date.now();
+
+            // Start polling for time updates
+            if (pollInterval) clearInterval(pollInterval);
+            pollInterval = setInterval(() => {
+              if (cancelled) return;
               try {
-                const t = Number(ytPlayerRef.current?.getCurrentTime?.() ?? 0);
-                const secs = Math.max(0, t);
-                const sections = result.lecture.sections;
-                let idx = 0;
-                for (let i = 0; i < sections.length; i++) {
-                  if (secs >= sections[i].startTime) idx = i;
-                  else break;
+                const player = ytPlayerRef.current;
+                if (!player?.getCurrentTime || !player?.getDuration) return;
+
+                const currentTime = Number(player.getCurrentTime() ?? 0);
+                const duration = Number(player.getDuration() ?? 0);
+                if (currentTime === 0 && duration === 0) return;
+
+                const sections = resultRef.current?.lecture?.sections;
+                if (sections && sections.length > 0) {
+                  let idx = 0;
+                  for (let i = 0; i < sections.length; i++) {
+                    if (currentTime >= sections[i].startTime) idx = i;
+                    else break;
+                  }
+
+                  const now = Date.now();
+                  const lastAt = ytLastPollAtRef.current || now;
+                  const elapsedSec = Math.min(45, Math.max(0, (now - lastAt) / 1000));
+                  ytLastPollAtRef.current = now;
+
+                  const state = typeof player.getPlayerState === "function" ? player.getPlayerState() : -1;
+                  const activelyWatching = state === 1 || state === 3;
+
+                  if (activelyWatching && elapsedSec > 0) {
+                    sectionWatchAccumRef.current[idx] = (sectionWatchAccumRef.current[idx] ?? 0) + elapsedSec;
+                  }
+
+                  const prevSec = ytLastSectionRef.current;
+                  if (prevSec !== idx) {
+                    setActiveSection(idx);
+                    if (prevSec >= 0 && idx === prevSec + 1) {
+                      const thr = sectionWatchThresholdSec(sections, prevSec);
+                      if ((sectionWatchAccumRef.current[prevSec] ?? 0) >= thr) {
+                        markChapterVisitedRef.current(prevSec);
+                      }
+                    }
+                    ytLastSectionRef.current = idx;
+                  }
+
+                  const lastIdx = sections.length - 1;
+                  if (activelyWatching && idx === lastIdx) {
+                    const thrLast = sectionWatchThresholdSec(sections, lastIdx);
+                    if ((sectionWatchAccumRef.current[lastIdx] ?? 0) >= thrLast) {
+                      markChapterVisitedRef.current(lastIdx);
+                    }
+                  }
                 }
-                if (ytLastSectionRef.current !== idx) {
-                  ytLastSectionRef.current = idx;
-                  setActiveSection(idx);
-                  markChapterVisited(idx);
+
+                // Update focusSeconds with actual video currentTime
+                if (duration > 0) {
+                  const prevProgress = lectureProgressRef.current;
+                  if (Math.floor(currentTime) > prevProgress.focusSeconds + 5) {
+                    updateLectureProgressRef.current((prev) => ({
+                      ...prev,
+                      focusSeconds: Math.floor(currentTime),
+                    }));
+                  }
                 }
-              } catch { /* ignore */ }
-            }, 2500);
+              } catch { /* player not ready yet */ }
+            }, 2000);
           },
         },
       });
-    })();
+    };
+
+    // Ensure YouTube IFrame API is loaded
+    if ((window as any).YT?.Player) {
+      // Small delay to ensure DOM is ready after React render
+      setTimeout(initPlayer, 100);
+    } else {
+      const existing = document.querySelector<HTMLScriptElement>("script[data-studyai-yt]");
+      if (!existing) {
+        const s = document.createElement("script");
+        s.src = "https://www.youtube.com/iframe_api";
+        s.async = true;
+        s.dataset.studyaiYt = "1";
+        document.head.appendChild(s);
+      }
+
+      const prevCallback = (window as any).onYouTubeIframeAPIReady;
+      (window as any).onYouTubeIframeAPIReady = () => {
+        prevCallback?.();
+        if (!cancelled) setTimeout(initPlayer, 100);
+      };
+
+      // Also poll in case the callback was already fired
+      const checkReady = setInterval(() => {
+        if ((window as any).YT?.Player) {
+          clearInterval(checkReady);
+          if (!cancelled && !ytPlayerRef.current) setTimeout(initPlayer, 100);
+        }
+      }, 500);
+
+      return () => {
+        cancelled = true;
+        clearInterval(checkReady);
+        if (pollInterval) clearInterval(pollInterval);
+        try { ytPlayerRef.current?.destroy?.(); } catch { /* ignore */ }
+        ytPlayerRef.current = null;
+        ytLastSectionRef.current = -1;
+      };
+    }
 
     return () => {
       cancelled = true;
-      if (ytPollRef.current) { clearInterval(ytPollRef.current); ytPollRef.current = null; }
+      if (pollInterval) clearInterval(pollInterval);
       try { ytPlayerRef.current?.destroy?.(); } catch { /* ignore */ }
       ytPlayerRef.current = null;
       ytLastSectionRef.current = -1;
     };
-  }, [appMode, result?.videoId, result?.lecture?.sections, markChapterVisited]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [appMode, result?.videoId]);
 
   const startProgress = () => {
     setProgress(0);
@@ -658,6 +1095,36 @@ export default function Home() {
     if (appMode !== "student") return;
     const target = (overrideUrl ?? url).trim();
     if (!target) return;
+
+    // Rate limit check: guests use server-side IP, signed-in users use localStorage
+    if (!isSignedIn) {
+      // Guest: server-side IP-based rate limiting
+      const { canGuestUseUrl, incrementGuestUrlCount } = await import("@/app/lib/guestSession");
+      const result = await canGuestUseUrl();
+      if (!result.allowed) {
+        setError("You've reached your daily limit of 1 URL. Please try again tomorrow.");
+        return;
+      }
+      if (result.warning) {
+        setUrlWarning("⚠️ Only 0 URLs remaining today!");
+      } else {
+        setUrlWarning(null);
+      }
+      // Increment after successful submission (will be called after processing starts)
+    } else {
+      // Signed-in: localStorage-based rate limiting (5 per day)
+      const result = canUseUrl(target, isSignedIn);
+      if (!result.allowed) {
+        setError("You've reached your daily limit of 5 URLs. Please try again tomorrow.");
+        return;
+      }
+      if (result.warning) {
+        setUrlWarning(`⚠️ Only ${result.remaining} URL${result.remaining !== 1 ? 's' : ''} remaining today!`);
+      } else {
+        setUrlWarning(null);
+      }
+    }
+
     setLoadingQuote(pickQuote("student"));
     setError(null);
     setResult(null);
@@ -690,7 +1157,22 @@ export default function Home() {
       setChatHistory([]);
       setStage("complete");
       celebrate();
-      // Persist to localStorage
+      
+      // Increment guest URL count if guest user
+      if (!isSignedIn) {
+        const { incrementGuestUrlCount } = await import("@/app/lib/guestSession");
+        await incrementGuestUrlCount();
+      }
+      
+      // Open check-in modal if not already done for this video
+      setLearnerProfile((prev) => {
+        const profile = prev ?? loadLearnerProfile();
+        if (!profile.checkedInLectures.includes(data.videoId)) {
+          setCheckInOpen(true);
+        }
+        return profile;
+      });
+      // Persist to localStorage (always) + Supabase (when signed in)
       const entry: SavedLecture = {
         id: data.videoId,
         title: data.lecture.title,
@@ -702,7 +1184,26 @@ export default function Home() {
         chatHistory: [],
       };
       saveLecture(entry);
-      setSavedLectures(loadSavedLectures());
+      if (isSignedIn) {
+        fetch("/api/saved-lectures", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            id:             entry.id,
+            title:          entry.title,
+            channelName:    entry.channelName,
+            thumbnailUrl:   entry.thumbnailUrl,
+            result:         entry.result,
+            studyMaterials: entry.studyMaterials,
+            chatHistory:    [],
+          }),
+        })
+          .then((r) => r.ok ? fetch("/api/saved-lectures").then((r2) => r2.ok ? r2.json() : []) : loadSavedLectures())
+          .then((lectures) => setSavedLectures(lectures as SavedLecture[]))
+          .catch(() => setSavedLectures(loadSavedLectures()));
+      } else {
+        setSavedLectures(loadSavedLectures());
+      }
       setTimeout(() => setStage("idle"), 300);
     } catch {
       clearTimeout(stageTimer1);
@@ -846,8 +1347,33 @@ export default function Home() {
 
   const isProcessing = stage === "extracting" || stage === "structuring" || stage === "generating";
 
+  // Memoize background to prevent remounting on every render
+  const background = useMemo(() => {
+    const shouldShow = appMode === "student" && (gateState !== "app" || (!result && stage === "idle") || isProcessing);
+    return shouldShow ? <AnimatedBackground density={70} interactive theme={theme} zIndex={0} /> : null;
+  }, [appMode, gateState, result, stage, isProcessing, theme]);
+
   return (
-    <div className={theme}>
+    <div className={theme} style={{ position: "relative", isolation: "isolate", minHeight: "100vh" }}>
+      {/* Constellation background — only on sign-in, home page, and during processing */}
+      {background}
+
+      {/*
+        ── Gate overlay — covers the entire screen until user picks a path.
+        Exists in "loading" phase (session resolving, opaque blank cover) and
+        "gate" phase (form visible). Only UNMOUNTS when gateState === "app".
+        Using a SINGLE AnimatePresence node so there is NEVER a gap between
+        the loading cover and the gate — the hero can never flash through.
+      */}
+      <AnimatePresence>
+        {gateState !== "app" && (
+          <SignInGate
+            phase={gateState}
+            onContinue={() => setGateState("app")}
+          />
+        )}
+      </AnimatePresence>
+
       <div className="flex min-h-screen" style={{ color: "var(--foreground)" }}>
 
         {/* ── Left Sidebar (ChatGPT-style) ── */}
@@ -929,7 +1455,17 @@ export default function Home() {
                 <>
                   <div className="flex items-center justify-between px-2 pt-3 pb-1">
                     <span className="text-[10px] font-mono uppercase tracking-wider" style={{ color: "var(--muted-foreground)" }}>Recent</span>
-                    <button onClick={() => { setSavedLectures([]); localStorage.removeItem(STORAGE_KEY); }}
+                    <button onClick={() => {
+                      setSavedLectures([]);
+                      localStorage.removeItem(STORAGE_KEY);
+                      if (isSignedIn) {
+                        // Cloud: bulk delete by clearing each (no bulk API needed — just clear local list)
+                        fetch("/api/saved-lectures").then((r) => r.ok ? r.json() : [])
+                          .then((lectures: SavedLecture[]) => {
+                            lectures.forEach((l) => fetch(`/api/saved-lectures?id=${l.id}`, { method: "DELETE" }).catch(() => {}));
+                          }).catch(() => {});
+                      }
+                    }}
                       className="text-[10px] hover:opacity-70 transition" style={{ color: "var(--muted-foreground)" }}>Clear</button>
                   </div>
                   {savedLectures.map((s) => (
@@ -952,7 +1488,18 @@ export default function Home() {
                           {s.channelName}
                         </p>
                       </div>
-                      <button onClick={(e) => { e.stopPropagation(); deleteSavedLecture(s.id); setSavedLectures(loadSavedLectures()); }}
+                      <button onClick={(e) => {
+                        e.stopPropagation();
+                        deleteSavedLecture(s.id);
+                        if (isSignedIn) {
+                          fetch(`/api/saved-lectures?id=${encodeURIComponent(s.id)}`, { method: "DELETE" })
+                            .then(() => fetch("/api/saved-lectures").then((r) => r.ok ? r.json() : []))
+                            .then((lectures) => setSavedLectures(lectures as SavedLecture[]))
+                            .catch(() => setSavedLectures(loadSavedLectures()));
+                        } else {
+                          setSavedLectures(loadSavedLectures());
+                        }
+                      }}
                         className="absolute top-1.5 right-1.5 h-6 w-6 rounded-md flex items-center justify-center opacity-0 group-hover:opacity-60 hover:!opacity-100 transition"
                         style={{ color: "var(--muted-foreground)", background: "transparent" }}>
                         <Trash2 className="h-3.5 w-3.5" />
@@ -963,9 +1510,10 @@ export default function Home() {
               )}
             </div>
             {/* Sidebar footer */}
-            <div className="shrink-0 px-3 py-3 border-t" style={{ borderColor: "var(--border)" }}>
+            <div className="shrink-0 px-3 py-3 border-t space-y-2" style={{ borderColor: "var(--border)" }}>
+
               {lectureProgress.achievements.length > 0 && (
-                <div className="mb-2">
+                <div>
                   <button
                     onClick={() => { setSidebarOpen(false); if (result) setTab("summary"); }}
                     className="w-full flex items-center gap-2 px-3 py-2 rounded-xl text-xs hover:opacity-80 transition"
@@ -976,11 +1524,6 @@ export default function Home() {
                   </button>
                 </div>
               )}
-              <button onClick={() => setTheme(t => t === "dark" ? "light" : "dark")}
-                className="w-full flex items-center gap-2 px-3 py-2.5 rounded-xl text-sm hover:opacity-80 transition"
-                style={{ color: "var(--muted-foreground)" }}>
-                {theme === "dark" ? <><Sun className="h-4 w-4" /> Light mode</> : <><Moon className="h-4 w-4" /> Dark mode</>}
-              </button>
             </div>
           </div>
         </aside>
@@ -1010,7 +1553,7 @@ export default function Home() {
                   <span className="hidden sm:inline text-[11px] font-mono uppercase tracking-wider" style={{ color: "var(--muted-foreground)" }}>v1.0</span>
                 </button>
               </div>
-              {/* Right: new lecture + theme */}
+              {/* Right: new lecture + theme + user */}
               <div className="flex items-center gap-1">
                 {result && (
                   <button onClick={reset}
@@ -1019,11 +1562,15 @@ export default function Home() {
                     <Plus className="h-3.5 w-3.5" /> New lecture
                   </button>
                 )}
-                <button onClick={() => setTheme(t => t === "dark" ? "light" : "dark")}
-                  className="h-8 w-8 flex items-center justify-center rounded-lg transition hover:opacity-80"
-                  style={{ color: "var(--muted-foreground)" }}>
-                  {theme === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
-                </button>
+                {/* Auth: avatar when signed in, sign-in button when guest */}
+                <HeaderUserArea
+                  session={session}
+                  onSignOut={() => signOut()}
+                  onShowGate={() => {
+                    try { localStorage.removeItem("studyai_guest_confirmed"); } catch { /* ignore */ }
+                    setGateState("gate");
+                  }}
+                />
               </div>
             </div>
           </header>
@@ -1035,44 +1582,12 @@ export default function Home() {
             <motion.main key="hero" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="flex-1">
               <div className="relative overflow-hidden">
                 <div className="absolute inset-0 -z-10">
-                  <div className="absolute inset-0 grid-pattern opacity-40" />
-                  <div className="absolute top-[-15%] right-[-8%] h-[520px] w-[520px] rounded-full blur-[140px] animate-float" style={{ background: "color-mix(in oklab, var(--primary) 15%, transparent)" }} />
-                  <div className="absolute bottom-[-10%] left-[-10%] h-[420px] w-[420px] rounded-full blur-[140px] animate-float" style={{ background: "color-mix(in oklab, var(--primary) 10%, transparent)", animationDelay: "5s" } as any} />
-                  {/* Network mesh overlay (Lovable-style) */}
-                  <svg className="absolute inset-0 w-full h-full opacity-70" viewBox="0 0 1200 700" preserveAspectRatio="none" aria-hidden="true">
-                    <defs>
-                      <linearGradient id="meshFade" x1="0" y1="0" x2="1" y2="1">
-                        <stop offset="0%" stopColor="transparent" />
-                        <stop offset="60%" stopColor="transparent" />
-                        <stop offset="100%" stopColor="var(--background)" stopOpacity="0.45" />
-                      </linearGradient>
-                    </defs>
-                    <g stroke="var(--foreground)" strokeOpacity="0.12" strokeWidth="1">
-                      <path d="M40 120 L180 80 L280 160 L160 240 Z" fill="none" />
-                      <path d="M820 90 L980 60 L1140 140 L980 220 Z" fill="none" />
-                      <path d="M980 420 L1120 360 L1180 500 L1040 560 Z" fill="none" />
-                      <path d="M120 520 L240 460 L360 560 L220 640 Z" fill="none" />
-                      <path d="M520 140 L640 90 L760 150 L640 220 Z" fill="none" />
-                      <path d="M520 420 L660 360 L820 440 L660 520 Z" fill="none" />
-                    </g>
-                    <g fill="var(--foreground)" fillOpacity="0.18">
-                      {[
-                        [180,80],[280,160],[160,240],[40,120],
-                        [980,60],[1140,140],[980,220],[820,90],
-                        [1120,360],[1180,500],[1040,560],[980,420],
-                        [240,460],[360,560],[220,640],[120,520],
-                        [640,90],[760,150],[640,220],[520,140],
-                        [660,360],[820,440],[660,520],[520,420],
-                      ].map(([x,y],i)=>(<circle key={i} cx={x} cy={y} r="2.4" />))}
-                    </g>
-                    <rect x="0" y="0" width="1200" height="700" fill="url(#meshFade)" />
-                  </svg>
                 </div>
 
                 {/* Hero section — Lovable-style split hero */}
                 <section className="mx-auto max-w-[1280px] px-4 sm:px-6 md:px-10 pt-10 sm:pt-16 pb-16 sm:pb-20">
                   <div className="grid grid-cols-12 gap-6 md:gap-10 items-end">
-                    <div className="col-span-12 lg:col-span-8 text-center lg:text-left">
+                    <div className="col-span-12 text-center">
                     <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.5 }}
                       className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full border text-[10px] sm:text-[11px] font-mono uppercase tracking-[0.18em] mb-6 sm:mb-7"
                       style={{ borderColor: "var(--border)", background: "var(--surface)", color: "var(--muted-foreground)" }}>
@@ -1089,13 +1604,14 @@ export default function Home() {
                     </motion.h1>
 
                     <motion.p initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.6, delay: 0.18 }}
-                      className="text-base sm:text-lg leading-relaxed mb-8 sm:mb-10 max-w-xl mx-auto lg:mx-0 px-2 lg:px-0"
+                      className="text-base sm:text-lg leading-relaxed mb-8 sm:mb-10 max-w-2xl mx-auto px-2"
                       style={{ color: "var(--muted-foreground)" }}>
-                      Paste a YouTube URL. Four AI agents extract, structure, and summarize the lecture into a calm, focused study workspace — with chat, flashcards, and semantic search built in.
+                      Paste a YouTube URL. Four AI agents extract, structure, and summarize the lecture into a calm, focused study workspace with chat, flashcards, and semantic search built in.
                     </motion.p>
 
                     <motion.form initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.6, delay: 0.35 }}
-                      onSubmit={(e) => { e.preventDefault(); submit(); }} className="mt-10 max-w-2xl mx-auto lg:mx-0">
+                      onSubmit={(e) => { e.preventDefault(); submit(); }} className="mt-10 max-w-2xl mx-auto">
+
                       <div className="surface flex items-center gap-2 rounded-2xl p-2 shadow-card relative transition"
                         style={{ borderColor: "var(--border)" }}>
                         <div className="hidden sm:flex items-center gap-2 pl-3 pr-2 border-r shrink-0" style={{ borderColor: "var(--border)", color: "var(--muted-foreground)" }}>
@@ -1123,7 +1639,9 @@ export default function Home() {
                       </div>
                     </motion.form>
 
-                    <div className="mt-6 flex items-center justify-center lg:justify-start gap-4 text-xs" style={{ color: "color-mix(in oklab, var(--muted-foreground) 85%, transparent)" }}>
+                    {error && <motion.p initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="text-sm mt-4 text-center" style={{ color: "var(--destructive)" }}>{error}</motion.p>}
+
+                    <div className="mt-6 flex items-center justify-center gap-4 text-xs" style={{ color: "color-mix(in oklab, var(--muted-foreground) 85%, transparent)" }}>
                       <div className="flex items-center gap-1.5"><Zap className="h-3.5 w-3.5" style={{ color: "var(--primary)" }} /> ~30s avg build time</div>
                       <div style={{ opacity: 0.3 }}>·</div>
                       <div className="flex items-center gap-1.5"><BookOpen className="h-3.5 w-3.5" style={{ color: "var(--primary)" }} /> Works on captioned videos</div>
@@ -1131,99 +1649,23 @@ export default function Home() {
 
                     </div>
 
-                    {/* Mascot panel (desktop/tablet) */}
-                    <motion.div
-                      initial={{ opacity: 0, scale: 0.96 }}
-                      animate={{ opacity: 1, scale: 1 }}
-                      transition={{ duration: 0.7, delay: 0.3 }}
-                      className="hidden md:block col-span-12 lg:col-span-4 relative"
-                    >
-                      <div className="relative aspect-square max-w-[360px] ml-auto">
-                        <div className="absolute inset-4 rounded-[36px] gradient-warm opacity-20 blur-2xl" />
-                        <div className="relative h-full surface-elevated rounded-[28px] p-6 flex flex-col items-center justify-center overflow-hidden">
-                          <div className="absolute inset-0 dot-pattern opacity-50" />
-                          <Mascot className="relative h-48 w-48 animate-float" animated />
-                          <div className="relative mt-4 text-center">
-                            <div className="font-serif text-2xl">Hi, I&apos;m Owlbert.</div>
-                            <div className="text-xs mt-1" style={{ color: "var(--muted-foreground)" }}>
-                              I&apos;ll read the lecture so you can think about it.
-                            </div>
-                          </div>
-                        </div>
-                        <motion.div
-                          animate={{ y: [0, -8, 0] }}
-                          transition={{ duration: 4, repeat: Infinity, ease: "easeInOut" }}
-                          className="absolute -top-3 -left-3 surface-elevated rounded-xl px-3 py-2 shadow-card flex items-center gap-2"
-                        >
-                          <Sparkles className="h-3.5 w-3.5" style={{ color: "var(--primary)" }} />
-                          <span className="text-xs font-medium">4 agents · 1 workspace</span>
-                        </motion.div>
-                      </div>
-                    </motion.div>
                   </div>
-                </section>
-
-                {/* Live preview / mockup */}
-                <section className="mx-auto max-w-[1200px] px-4 sm:px-6 md:px-12 pb-16 sm:pb-24">
-                  <motion.div initial={{ opacity: 0, y: 30 }} whileInView={{ opacity: 1, y: 0 }} viewport={{ once: true, margin: "-100px" }}
-                    transition={{ duration: 0.7 }}
-                    className="surface rounded-2xl sm:rounded-3xl p-3 sm:p-5 shadow-elegant relative overflow-hidden">
-                    {/* Window chrome */}
-                    <div className="flex items-center gap-1.5 mb-3 sm:mb-4 px-2">
-                      <div className="h-2.5 w-2.5 rounded-full" style={{ background: "color-mix(in oklab, var(--destructive) 70%, transparent)" }} />
-                      <div className="h-2.5 w-2.5 rounded-full" style={{ background: "color-mix(in oklab, var(--warning) 70%, transparent)" }} />
-                      <div className="h-2.5 w-2.5 rounded-full" style={{ background: "color-mix(in oklab, var(--success) 70%, transparent)" }} />
-                      <div className="ml-3 px-2 py-0.5 rounded-md text-[10px] font-mono" style={{ background: "var(--surface-elevated)", color: "var(--muted-foreground)" }}>studyai.app</div>
-                    </div>
-                    <div className="grid grid-cols-1 md:grid-cols-3 gap-3 sm:gap-4">
-                      {/* Mock chapter rail */}
-                      <div className="surface-elevated rounded-xl p-3 sm:p-4">
-                        <div className="text-[10px] font-mono uppercase tracking-wider mb-3" style={{ color: "var(--muted-foreground)" }}>Chapters · 6</div>
-                        {["Introduction", "Core concepts", "Real-world examples", "Common pitfalls", "Best practices", "Wrap-up"].map((t, i) => (
-                          <div key={t} className="py-2 px-2 rounded-md text-xs sm:text-sm flex items-center justify-between" style={{ background: i === 1 ? "color-mix(in oklab, var(--primary) 12%, transparent)" : "transparent", color: i === 1 ? "var(--foreground)" : "var(--muted-foreground)" }}>
-                            <span className="truncate">{t}</span>
-                            <span className="font-mono text-[10px] opacity-60">{Math.floor(i * 4.2).toString().padStart(2, "0")}:{(i * 13 % 60).toString().padStart(2, "0")}</span>
-                          </div>
-                        ))}
-                      </div>
-                      {/* Mock content area */}
-                      <div className="md:col-span-2 surface-elevated rounded-xl p-4 sm:p-5">
-                        <div className="text-[10px] font-mono uppercase tracking-wider mb-3" style={{ color: "var(--muted-foreground)" }}>Summary · Standard 5 min</div>
-                        <div className="space-y-2 mb-5">
-                          <div className="h-3 rounded" style={{ background: "color-mix(in oklab, var(--foreground) 8%, transparent)", width: "92%" }} />
-                          <div className="h-3 rounded" style={{ background: "color-mix(in oklab, var(--foreground) 8%, transparent)", width: "85%" }} />
-                          <div className="h-3 rounded" style={{ background: "color-mix(in oklab, var(--foreground) 8%, transparent)", width: "78%" }} />
-                          <div className="h-3 rounded" style={{ background: "color-mix(in oklab, var(--foreground) 8%, transparent)", width: "65%" }} />
-                        </div>
-                        <div className="flex flex-wrap gap-1.5">
-                          {["Backpropagation", "Gradient descent", "Loss functions", "Activation", "Regularization"].map((t) => (
-                            <span key={t} className="text-[11px] px-2.5 py-1 rounded-md" style={{ background: "color-mix(in oklab, var(--primary) 14%, transparent)", color: "var(--primary)" }}>{t}</span>
-                          ))}
-                        </div>
-                        <div className="mt-5 pt-4 border-t" style={{ borderColor: "var(--border)" }}>
-                          <div className="text-[10px] font-mono uppercase tracking-wider mb-2" style={{ color: "var(--muted-foreground)" }}>Flashcard · 3 of 8</div>
-                          <div className="text-sm font-medium mb-1">What problem does gradient descent solve?</div>
-                          <div className="text-xs" style={{ color: "var(--muted-foreground)" }}>Tap to reveal · 02:14</div>
-                        </div>
-                      </div>
-                    </div>
-                  </motion.div>
                 </section>
 
                 {/* Built for moments — student personas */}
                 <section className="mx-auto max-w-[1200px] px-4 sm:px-6 md:px-12 pb-16 sm:pb-24">
                   <div className="text-center mb-8 sm:mb-12">
-                    <div className="text-[10px] sm:text-[11px] font-mono uppercase tracking-[0.18em] mb-3" style={{ color: "var(--muted-foreground)" }}>§01 — Built for students</div>
+                    <div className="text-[10px] sm:text-[11px] font-mono uppercase tracking-[0.18em] mb-3" style={{ color: "var(--muted-foreground)" }}>§01 - Built for students</div>
                     <h2 className="font-serif text-3xl sm:text-4xl md:text-5xl leading-[1.05] tracking-tight">
                       For the moments <em className="italic" style={{ color: "var(--primary)" }}>that matter</em>.
                     </h2>
                   </div>
                   <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
                     {[
-                      { icon: Coffee,         t: "Cramming for finals",     d: "Turn 2-hour lectures into 90-second TL;DRs the night before." },
+                      { icon: Coffee,         t: "Cramming for finals",     d: "Turn 2-hour lectures into bite-sized summaries the night before." },
                       { icon: Target,         t: "Catching up after class", d: "Get the structure, key concepts, and a study deck instantly." },
                       { icon: GraduationCap,  t: "Self-learning",            d: "Build a study workspace from any expert lecture on YouTube." },
-                      { icon: BookOpen,       t: "Learning in a 2nd language", d: "Translate every summary, flashcard, and concept in seconds." },
+                      { icon: BookOpen,       t: "Exam preparation",         d: "Test yourself with AI-generated quizzes and flashcards." },
                     ].map((p, i) => (
                       <motion.div key={p.t} initial={{ opacity: 0, y: 16 }} whileInView={{ opacity: 1, y: 0 }}
                         viewport={{ once: true }} transition={{ duration: 0.45, delay: i * 0.06 }}
@@ -1240,53 +1682,6 @@ export default function Home() {
                 </section>
 
                 {/* Pipeline section */}
-                <section className="mx-auto max-w-[1200px] px-4 sm:px-6 md:px-12 pb-20 sm:pb-32">
-                  <div className="text-center mb-8 sm:mb-12">
-                    <div className="text-[10px] sm:text-[11px] font-mono uppercase tracking-[0.18em] mb-3" style={{ color: "var(--muted-foreground)" }}>§02 — How it works</div>
-                    <h2 className="font-serif text-3xl sm:text-4xl md:text-5xl leading-[1.05] tracking-tight">
-                      Four agents. <em className="italic" style={{ color: "var(--primary)" }}>One</em> seamless workspace.
-                    </h2>
-                  </div>
-                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
-                    {[
-                      { icon: Headphones, n: "01", t: "Extractor",    d: "Pulls transcript and captions from any YouTube video." },
-                      { icon: Layers,     n: "02", t: "Structurer",   d: "Detects chapters, key concepts, and logical outline." },
-                      { icon: Sparkles,   n: "03", t: "Synthesizer",  d: "Writes 3-depth summaries and generates flashcards." },
-                      { icon: Search,     n: "04", t: "Indexer",      d: "Powers semantic search and instant translation." },
-                    ].map((s, i) => (
-                      <motion.div key={s.n} initial={{ opacity: 0, y: 12 }} whileInView={{ opacity: 1, y: 0 }}
-                        viewport={{ once: true }} transition={{ duration: 0.4, delay: i * 0.06 }}
-                        className="surface rounded-2xl p-5 sm:p-6 hover:shadow-card transition relative">
-                        <div className="flex items-center justify-between mb-4">
-                          <div className="h-9 w-9 sm:h-10 sm:w-10 rounded-lg flex items-center justify-center" style={{ background: "color-mix(in oklab, var(--primary) 15%, transparent)" }}>
-                            <s.icon className="h-4 w-4 sm:h-5 sm:w-5" style={{ color: "var(--primary)" }} strokeWidth={1.75} />
-                          </div>
-                          <span className="font-mono text-[10px] uppercase tracking-wider" style={{ color: "var(--muted-foreground)" }}>Agent {s.n}</span>
-                        </div>
-                        <h3 className="font-serif text-lg sm:text-xl mb-1.5">{s.t}</h3>
-                        <p className="text-xs sm:text-sm leading-relaxed" style={{ color: "var(--muted-foreground)" }}>{s.d}</p>
-                      </motion.div>
-                    ))}
-                  </div>
-
-                  {/* Final CTA */}
-                  <motion.div initial={{ opacity: 0, y: 20 }} whileInView={{ opacity: 1, y: 0 }} viewport={{ once: true }} transition={{ duration: 0.5 }}
-                    className="mt-16 sm:mt-24 text-center surface rounded-3xl p-8 sm:p-12 relative overflow-hidden">
-                    <div className="absolute inset-0 -z-10 opacity-50" style={{ background: "radial-gradient(ellipse at center, color-mix(in oklab, var(--primary) 10%, transparent) 0%, transparent 70%)" }} />
-                    <Zap className="h-7 w-7 mx-auto mb-4" style={{ color: "var(--primary)" }} />
-                    <h2 className="font-serif text-2xl sm:text-3xl md:text-4xl leading-tight tracking-tight max-w-2xl mx-auto mb-3">
-                      Stop watching. Start <em className="italic" style={{ color: "var(--primary)" }}>understanding</em>.
-                    </h2>
-                    <p className="text-sm sm:text-base mb-6 max-w-xl mx-auto" style={{ color: "var(--muted-foreground)" }}>
-                      Paste a link above to generate your first study workspace.
-                    </p>
-                    <button onClick={() => { document.querySelector<HTMLInputElement>('input[type="url"]')?.focus(); window.scrollTo({ top: 0, behavior: "smooth" }); }}
-                      className="inline-flex items-center gap-2 h-11 px-6 rounded-xl text-sm font-medium hover:opacity-90 transition"
-                      style={{ background: "var(--foreground)", color: "var(--background)" }}>
-                      Try it now <ArrowRight className="h-4 w-4" />
-                    </button>
-                  </motion.div>
-                </section>
               </div>
             </motion.main>
           )}
@@ -1296,7 +1691,6 @@ export default function Home() {
             <motion.main key="processing" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
               className="flex-1 flex items-center justify-center px-4 py-16">
               <div className="absolute inset-0 -z-10 overflow-hidden pointer-events-none">
-                <div className="absolute inset-0 grid-pattern opacity-30" />
                 <div className="absolute top-1/3 left-1/2 -translate-x-1/2 h-[500px] w-[500px] rounded-full blur-[140px] animate-pulse-soft" style={{ background: "color-mix(in oklab, var(--primary) 8%, transparent)" }} />
               </div>
 
@@ -1436,11 +1830,7 @@ export default function Home() {
                     <motion.div initial={{ opacity: 0, scale: 0.99 }} animate={{ opacity: 1, scale: 1 }}
                       className="aspect-video rounded-xl overflow-hidden border shadow-elegant"
                       style={{ borderColor: "var(--border)", background: "#000" }}>
-                      <iframe ref={iframeRef}
-                        src={`https://www.youtube.com/embed/${result.videoId}?rel=0&enablejsapi=1&playsinline=1&origin=${encodeURIComponent(typeof window !== "undefined" ? window.location.origin : "")}`}
-                        title={result.lecture.title}
-                        allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
-                        allowFullScreen className="w-full h-full" />
+                      <div ref={iframeRef} id="studyai-yt-player" className="w-full h-full" />
                     </motion.div>
 
                     {/* Tab bar (full-width) */}
@@ -1502,13 +1892,15 @@ export default function Home() {
                     <div className="min-h-[400px]">
                       <AnimatePresence mode="wait">
                         <motion.div key={tab} initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -4 }} transition={{ duration: 0.18 }}>
-                          {tab === "summary" && <SummaryTab materials={studyMaterials} />}
+                          {tab === "summary" && <SummaryTab materials={studyMaterials} skillLevel={learnerProfile?.overallLevel} />}
                           {tab === "flashcards" && (
                             <FlashcardsTab
                               materials={studyMaterials}
                               onSeek={seek}
                               reviewed={lectureProgress.cardsReviewed}
+                              skillLevel={learnerProfile?.overallLevel}
                               onReviewed={(idx) => {
+                                giveXP("reviewFlashcard", { label: "Flashcard reviewed" });
                                 updateLectureProgress((p) => {
                                   const next = { ...p, cardsReviewed: uniq([...p.cardsReviewed, idx]) };
                                   if (next.cardsReviewed.length >= studyMaterials.flashcards.length && studyMaterials.flashcards.length > 0) {
@@ -1526,9 +1918,12 @@ export default function Home() {
                           {tab === "quiz" && (
                             <QuizTab
                               materials={studyMaterials}
-                              onCompleted={(pct) => {
+                              skillLevel={learnerProfile?.overallLevel}
+                              onCompleted={(pct, weakTopics) => {
+                                giveXP("completeQuiz", { label: "Quiz completed" });
+                                if (pct >= 80) giveXP("score80Plus", { quizScore: pct, label: "Scored 80%+" });
                                 updateLectureProgress((p) => {
-                                  const next = { ...p, quizScore: pct };
+                                  const next = { ...p, quizScore: pct, weakTopics };
                                   if (pct === 100) {
                                     celebrate();
                                     return addAchievement(next, { id: "perfect-quiz", title: "Perfect score", desc: "100% on the quiz." });
@@ -1536,30 +1931,57 @@ export default function Home() {
                                   if (pct >= 70) return addAchievement(next, { id: "passed-quiz", title: "Concept solid", desc: "Passed the quiz." });
                                   return next;
                                 });
+                                // Continuous adaptation: update profile with new quiz score
+                                setLearnerProfile((prev) => {
+                                  if (!prev) return prev;
+                                  const historyEntry = {
+                                    videoId: result.videoId,
+                                    score: pct,
+                                    level: prev.overallLevel,
+                                    timestamp: Date.now(),
+                                  };
+                                  const updated: LearnerProfile = {
+                                    ...prev,
+                                    quizHistory: [historyEntry, ...prev.quizHistory].slice(0, 50),
+                                    overallLevel: adaptLevel(prev, pct),
+                                    chatTone: levelToTone(adaptLevel(prev, pct)),
+                                  };
+                                  saveLearnerProfile(updated);
+                                  syncProfileToBackend({ ...updated, newQuizScore: pct } as LearnerProfile & { newQuizScore: number });
+                                  return updated;
+                                });
                               }}
                             />
                           )}
-                          {tab === "insights" && <InsightsTab insights={result.insights} concepts={studyMaterials.concepts} onSeek={seek} />}
+                          {tab === "insights" && <InsightsTab insights={result.insights} concepts={studyMaterials.concepts} onSeek={seek} weakTopics={lectureProgress.weakTopics} />}
                           {tab === "chat" && (
                             <ChatTab
                               result={result}
                               materials={studyMaterials}
                               initialHistory={chatHistory}
+                              skillLevel={learnerProfile?.overallLevel}
                               onHistoryChange={(h) => {
                                 setChatHistory(h);
                                 updateChatHistory(result.videoId, h);
+                                // Also sync to Supabase when signed in
+                                if (isSignedIn) {
+                                  fetch("/api/saved-lectures", {
+                                    method: "POST",
+                                    headers: { "Content-Type": "application/json" },
+                                    body: JSON.stringify({ id: result.videoId, chatHistory: h, chatHistoryOnly: true }),
+                                  }).catch(() => { /* non-critical */ });
+                                }
                               }}
-                              onUsed={() => updateLectureProgress({ chatUsed: true })}
+                              onUsed={() => { giveXP("useChat", { label: "Asked Owlbert" }); updateLectureProgress({ chatUsed: true }); }}
                             />
                           )}
                           {tab === "find" && (
                             <FindTab
                               lecture={result.lecture}
                               onSeek={seek}
-                              onUsed={() => updateLectureProgress({ searchUsed: true })}
+                              onUsed={() => { giveXP("useSearch", { label: "Used semantic search" }); updateLectureProgress({ searchUsed: true }); }}
                             />
                           )}
-                          {/* translate tab removed for v1 */}
                         </motion.div>
                       </AnimatePresence>
                     </div>
@@ -1567,15 +1989,68 @@ export default function Home() {
 
                   {/* Right */}
                   <aside className="space-y-5 min-w-0">
+                    {/* Scholar Level */}
+                    {(() => {
+                      const { level, currentXP, nextLevelXP, progress } = getLevelInfo(xpState.totalXP);
+                      return (
+                        <div className="rounded-xl p-4 border" style={{ background: "var(--surface-elevated)", borderColor: "var(--border)" }}>
+                          <div className="text-[10px] font-mono uppercase tracking-[0.18em] mb-3 flex items-center gap-2" style={{ color: "var(--muted-foreground)" }}>
+                            ⭐ Scholar Level
+                          </div>
+                          <div className="flex items-center gap-3 mb-3">
+                            <div className="h-12 w-12 rounded-xl flex items-center justify-center shrink-0 font-bold text-lg"
+                              style={{ background: "linear-gradient(135deg,#ff8c14,#ff4500)", color: "#fff", boxShadow: "0 2px 12px rgba(255,100,20,0.45)", fontFamily: "var(--font-mono)" }}>
+                              {level}
+                            </div>
+                            <div>
+                              <div className="font-semibold text-sm">Lv. {level}</div>
+                              <div className="text-[10px] font-mono mt-0.5" style={{ color: "var(--muted-foreground)" }}>
+                                {currentXP} / {nextLevelXP} XP to Lv. {level + 1}
+                              </div>
+                            </div>
+                          </div>
+                          <div className="h-2 rounded-full overflow-hidden mb-2" style={{ background: "var(--border)" }}>
+                            <div className="h-full rounded-full transition-all duration-700"
+                              style={{ width: `${progress * 100}%`, background: "linear-gradient(90deg,#ff8c14,#ff4500)" }} />
+                          </div>
+                          <div className="text-[10px] font-mono text-right" style={{ color: "var(--muted-foreground)" }}>
+                            Total XP: {xpState.totalXP}
+                          </div>
+                        </div>
+                      );
+                    })()}
+
+                    {/* Daily Quests */}
+                    <div className="rounded-xl p-4 border" style={{ background: "var(--surface-elevated)", borderColor: "var(--border)" }}>
+                      <div className="text-[10px] font-mono uppercase tracking-[0.18em] mb-3 flex items-center justify-between" style={{ color: "var(--muted-foreground)" }}>
+                        <span className="flex items-center gap-1.5"><Sparkles className="h-3 w-3" style={{ color: "var(--primary)" }} /> Today&apos;s Quests</span>
+                        <span>{xpState.quests.filter(q => q.completed).length}/{xpState.quests.length}</span>
+                      </div>
+                      <div className="space-y-2.5">
+                        {xpState.quests.map((q) => (
+                          <div key={q.id} className="flex items-center gap-2.5">
+                            <div className="shrink-0 h-5 w-5 rounded-md flex items-center justify-center text-[10px]"
+                              style={{ background: q.completed ? "color-mix(in oklab, var(--success) 18%, transparent)" : "var(--border)", color: q.completed ? "var(--success)" : "var(--muted-foreground)" }}>
+                              {q.completed ? "✓" : "·"}
+                            </div>
+                            <div className="flex-1 min-w-0">
+                              <div className="text-xs leading-none mb-1 truncate" style={{ color: q.completed ? "var(--muted-foreground)" : "var(--foreground)", textDecoration: q.completed ? "line-through" : "none" }}>
+                                {q.title}
+                              </div>
+                              <div className="h-1 rounded-full overflow-hidden" style={{ background: "var(--border)" }}>
+                                <div className="h-full rounded-full transition-all duration-500"
+                                  style={{ width: `${(q.progress / q.target) * 100}%`, background: q.completed ? "var(--success)" : "var(--primary)" }} />
+                              </div>
+                            </div>
+                            <div className="shrink-0 text-[10px] font-mono" style={{ color: q.completed ? "var(--success)" : "var(--muted-foreground)" }}>
+                              {q.progress}/{q.target} +{q.reward}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+
                     <NextBestActionPanel tab={tab} setTab={setTab} progress={lectureProgress} />
-                    <FocusBlockPanel
-                      progress={lectureProgress}
-                      onChange={(sec) => updateLectureProgress({ focusSeconds: sec })}
-                      onGoal={() => {
-                        updateLectureProgress((p) => addAchievement(p, { id: "first-focus", title: "First focus block", desc: "Completed a 25-minute study session." }));
-                        celebrate();
-                      }}
-                    />
                     <ConceptsPanel concepts={studyMaterials.concepts} />
                     <StatsPanel lecture={result.lecture} materials={studyMaterials} />
                     <AchievementsPanel achievements={lectureProgress.achievements} />
@@ -1605,7 +2080,7 @@ export default function Home() {
                 <p className="text-[10px] font-mono uppercase tracking-[0.2em] mb-3" style={{ color: "var(--muted-foreground)" }}>Capability 2 · Faculty</p>
                 <h1 className="font-serif text-3xl md:text-4xl tracking-tight mb-3">Private lecture audit</h1>
                 <p className="text-sm leading-relaxed mb-8" style={{ color: "var(--muted-foreground)" }}>
-                  Voluntary, restraint-driven feedback for <em>you</em> before publishing: pedagogy, accessibility, equity, and clarity — with a prioritized fix list and timestamped rewrite ideas. Nothing here is shared with students or used for surveillance.
+                  Voluntary, restraint-driven feedback for <em>you</em> before publishing: pedagogy, accessibility, equity, and clarity, with a prioritized fix list and timestamped rewrite ideas. Nothing here is shared with students or used for surveillance.
                 </p>
                 <form onSubmit={(e) => { e.preventDefault(); submitFaculty(); }} className="space-y-4">
                   <div className="surface rounded-2xl p-2 shadow-elegant flex gap-2">
@@ -1702,7 +2177,7 @@ export default function Home() {
                 <p className="text-[10px] font-mono uppercase tracking-[0.2em]" style={{ color: "var(--muted-foreground)" }}>Capability 3 · Provost</p>
                 <h1 className="font-serif text-3xl md:text-4xl tracking-tight">Curriculum coverage map</h1>
                 <p className="text-sm leading-relaxed" style={{ color: "var(--muted-foreground)" }}>
-                  Paste multiple lecture URLs from one course and your stated learning objectives. The map compares what was actually taught (from transcripts) to those objectives — for leadership QA, not student surveillance.
+                  Paste multiple lecture URLs from one course and your stated learning objectives. The map compares what was actually taught (from transcripts) to those objectives, for leadership QA, not student surveillance.
                 </p>
                 <div className="grid gap-4 md:grid-cols-2">
                   <div>
@@ -1826,6 +2301,21 @@ export default function Home() {
 
         </div>
       </div>
+
+      {/* Adaptive learning check-in modal */}
+      {checkInOpen && (
+        <CheckInModal
+          lectureTitle={result?.lecture?.title}
+          onDone={handleCheckInDone}
+          onSkip={handleCheckInSkip}
+        />
+      )}
+
+      {/* XP toast notifications */}
+      <XPToastContainer
+        toasts={xpToasts}
+        onDismiss={(id) => setXpToasts((t) => t.filter((x) => x.id !== id))}
+      />
     </div>
   );
 }
@@ -1979,7 +2469,7 @@ function ProvostCurriculumPanels({
           <h4 className="text-[10px] font-mono uppercase tracking-wider mb-2" style={{ color: "var(--warning)" }}>Lecture ingest notes</h4>
           <ul className="text-xs space-y-1 font-mono" style={{ color: "var(--muted-foreground)" }}>
             {perVideo.map((p, i) => (
-              <li key={i}>{p.metadata?.title ?? p.url}{p.error ? ` — ${p.error}` : " — OK"}</li>
+              <li key={i}>{p.metadata?.title ?? p.url}{p.error ? ` [${p.error}]` : " [OK]"}</li>
             ))}
           </ul>
         </div>
@@ -2122,8 +2612,22 @@ function ProgressPanel({
   const totalCards = materials.flashcards.length || 1;
   const sectionsPct = Math.round((progress.sectionsCompleted.length / totalSections) * 100);
   const cardsPct = Math.round((progress.cardsReviewed.length / totalCards) * 100);
+  
+  // Calculate video watch percentage based on focusSeconds vs total lecture duration
+  const lastSectionEnd = lecture.sections.length > 0
+    ? lecture.sections[lecture.sections.length - 1].startTime + 300 // estimate: last section + 5 min
+    : 3600;
+  const totalDuration = Math.max(lastSectionEnd, 60);
+  const videoPct = Math.min(100, Math.round((progress.focusSeconds / totalDuration) * 100));
+  
+  // Overall now includes video watching as the primary factor (40% weight)
   const overall = Math.round(
-    (sectionsPct + cardsPct + (progress.searchUsed ? 100 : 0) + (progress.chatUsed ? 100 : 0) + (progress.quizScore !== null ? 100 : 0)) / 5
+    videoPct * 0.4 +
+    sectionsPct * 0.2 +
+    cardsPct * 0.15 +
+    (progress.chatUsed ? 100 : 0) * 0.1 +
+    (progress.searchUsed ? 100 : 0) * 0.05 +
+    (progress.quizScore !== null ? 100 : 0) * 0.1
   );
 
   return (
@@ -2138,11 +2642,12 @@ function ProgressPanel({
         <motion.div className="h-full gradient-warm" initial={{ width: 0 }} animate={{ width: `${overall}%` }} transition={{ duration: 0.6 }} />
       </div>
       <div className="space-y-2 text-xs">
+        <ProgressRow label="Video watched" value={`${Math.floor(progress.focusSeconds / 60)}m`} pct={videoPct} />
         <ProgressRow label="Chapters explored" value={`${progress.sectionsCompleted.length}/${totalSections}`} pct={sectionsPct} />
         <ProgressRow label="Flashcards reviewed" value={`${progress.cardsReviewed.length}/${totalCards}`} pct={cardsPct} />
-        <ProgressRow label="Asked the chatbot" value={progress.chatUsed ? "✓" : "—"} pct={progress.chatUsed ? 100 : 0} />
-        <ProgressRow label="Used search" value={progress.searchUsed ? "✓" : "—"} pct={progress.searchUsed ? 100 : 0} />
-        <ProgressRow label="Quiz" value={progress.quizScore !== null ? `${progress.quizScore}%` : "—"} pct={progress.quizScore ?? 0} />
+        <ProgressRow label="Asked the chatbot" value={progress.chatUsed ? "✓" : "-"} pct={progress.chatUsed ? 100 : 0} />
+        <ProgressRow label="Used search" value={progress.searchUsed ? "✓" : "-"} pct={progress.searchUsed ? 100 : 0} />
+        <ProgressRow label="Quiz" value={progress.quizScore !== null ? `${progress.quizScore}%` : "-"} pct={progress.quizScore ?? 0} />
       </div>
     </div>
   );
@@ -2317,17 +2822,33 @@ function AchievementsPanel({ achievements }: { achievements: Achievement[] }) {
 }
 
 /* ─── Summary Tab ─── */
-function SummaryTab({ materials }: { materials: StudyMaterials }) {
+function SummaryTab({ materials, skillLevel }: { materials: StudyMaterials; skillLevel?: SkillLevel }) {
   const [mode, setMode] = useState<"short" | "medium" | "full">("medium");
   const modes = [
     { id: "short" as const, label: "TL;DR", time: "90 sec" },
     { id: "medium" as const, label: "Standard", time: "5 min" },
     { id: "full" as const, label: "Deep dive", time: "12 min" },
   ];
+
+  const levelBadge: Record<string, { label: string; color: string }> = {
+    beginner:     { label: "Beginner mode", color: "var(--success)" },
+    intermediate: { label: "Standard mode", color: "var(--primary)" },
+    advanced:     { label: "Advanced mode", color: "var(--warning)" },
+  };
+  const badge = skillLevel ? levelBadge[skillLevel] : null;
+
   return (
     <div>
       <div className="flex items-center justify-between mb-6 flex-wrap gap-3">
-        <h3 className="font-serif text-2xl">The lecture, <em style={{ color: "var(--primary)" }}>distilled</em>.</h3>
+        <div className="flex items-center gap-3">
+          <h3 className="font-serif text-2xl">The lecture, <em style={{ color: "var(--primary)" }}>distilled</em>.</h3>
+          {badge && (
+            <span className="text-[10px] font-mono uppercase tracking-wider px-2 py-0.5 rounded-full border"
+              style={{ color: badge.color, borderColor: `color-mix(in oklab, ${badge.color} 40%, transparent)`, background: `color-mix(in oklab, ${badge.color} 10%, transparent)` }}>
+              {badge.label}
+            </span>
+          )}
+        </div>
         <div className="flex items-center gap-1 surface rounded-lg p-1">
           {modes.map((m) => (
             <button key={m.id} onClick={() => setMode(m.id)}
@@ -2408,19 +2929,45 @@ function FlashcardsTab({
   onSeek,
   reviewed,
   onReviewed,
+  skillLevel,
 }: {
   materials: StudyMaterials;
   onSeek: (s: number) => void;
   reviewed: number[];
   onReviewed: (idx: number) => void;
+  skillLevel?: SkillLevel;
 }) {
+  const orderedCards = useMemo(() => {
+    const cards = materials.flashcards;
+    if (!skillLevel || skillLevel === "intermediate") return cards;
+    const sorted = [...cards];
+    if (skillLevel === "beginner") {
+      sorted.sort((a, b) => a.answer.length - b.answer.length);
+    } else {
+      sorted.sort((a, b) => b.timestamp - a.timestamp || b.answer.length - a.answer.length);
+    }
+    return sorted;
+  }, [materials.flashcards, skillLevel]);
+
   const [idx, setIdx] = useState(0);
   const [flipped, setFlipped] = useState(false);
-  const cards = materials.flashcards;
+  const cards = orderedCards;
   const card = cards[idx];
   const total = cards.length;
   const nav = (dir: 1 | -1) => { setFlipped(false); setTimeout(() => setIdx((i) => (i + dir + total) % total), 120); };
   const reviewedSet = useMemo(() => new Set(reviewed), [reviewed]);
+
+  // Auto-mark as reviewed when user flips the card
+  const handleFlip = useCallback(() => {
+    setFlipped(f => {
+      const nextFlipped = !f;
+      // Mark as reviewed when flipping to answer side
+      if (nextFlipped && !reviewedSet.has(idx)) {
+        onReviewed(idx);
+      }
+      return nextFlipped;
+    });
+  }, [idx, reviewedSet, onReviewed]);
 
   if (!card) return <div className="text-center py-16 text-sm" style={{ color: "var(--muted-foreground)" }}>No flashcards available.</div>;
 
@@ -2437,7 +2984,13 @@ function FlashcardsTab({
       <div className="flex gap-1 mb-5">
         {cards.map((_, i) => (
           <button key={i} onClick={() => { setFlipped(false); setIdx(i); }}
-            className="h-1 rounded-full transition-all" style={{ width: i === idx ? "2rem" : "0.4rem", background: i === idx ? "var(--foreground)" : "var(--border)" }} />
+            className="h-1 rounded-full transition-all"
+            style={{
+              width: i === idx ? "2rem" : "0.4rem",
+              background: reviewedSet.has(i)
+                ? "var(--primary)"
+                : i === idx ? "var(--foreground)" : "var(--border)",
+            }} />
         ))}
       </div>
 
@@ -2447,11 +3000,18 @@ function FlashcardsTab({
           style={{ height: "300px", willChange: "transform" }}
           animate={{ rotateY: flipped ? 180 : 0 }}
           transition={{ duration: 0.55, type: "spring", stiffness: 90, damping: 20 }}
-          onClick={() => setFlipped(f => !f)}>
+          onClick={handleFlip}>
           {/* Front */}
           <div className="absolute inset-0 backface-hidden rounded-2xl surface-elevated p-7 shadow-card flex flex-col">
             <div className="flex items-center justify-between mb-5">
-              <span className="text-[10px] font-mono uppercase tracking-[0.18em]" style={{ color: "var(--muted-foreground)" }}>Question</span>
+              <span className="text-[10px] font-mono uppercase tracking-[0.18em]" style={{ color: "var(--muted-foreground)" }}>
+                Question
+                {reviewedSet.has(idx) && (
+                  <span className="ml-2 inline-flex items-center gap-1" style={{ color: "var(--primary)" }}>
+                    <CheckCircle2 className="h-3 w-3 inline" /> read
+                  </span>
+                )}
+              </span>
               <button onClick={(e) => { e.stopPropagation(); onSeek(card.timestamp); }}
                 className="text-xs font-mono flex items-center gap-1.5 transition hover:opacity-70" style={{ color: "var(--muted-foreground)" }}>
                 <Play className="h-3 w-3" /> {formatTime(card.timestamp)}
@@ -2485,15 +3045,6 @@ function FlashcardsTab({
           style={{ borderColor: "var(--border)", color: "var(--foreground)" }}>
           <ChevronLeft className="h-3.5 w-3.5" /> Prev
         </button>
-        {flipped && !reviewedSet.has(idx) && (
-          <button
-            onClick={(e) => { e.stopPropagation(); onReviewed(idx); nav(1); }}
-            className="px-4 py-2 rounded-lg text-sm font-medium transition hover:opacity-90"
-            style={{ background: "var(--foreground)", color: "var(--background)" }}
-          >
-            <Check className="h-4 w-4 inline-block mr-1.5" /> Got it
-          </button>
-        )}
         <button onClick={() => nav(1)} className="flex items-center gap-1.5 px-4 py-2 rounded-lg border text-sm transition hover:opacity-80"
           style={{ borderColor: "var(--border)", color: "var(--foreground)" }}>
           Next <ChevronRight className="h-3.5 w-3.5" />
@@ -2537,7 +3088,7 @@ function FindTab({ lecture, onSeek, onUsed }: { lecture: StructuredLecture; onSe
     <div>
       <h3 className="font-serif text-2xl mb-1">Find any moment.</h3>
       <p className="text-sm mb-5" style={{ color: "var(--muted-foreground)" }}>
-        Ask a question — AI locates the exact timestamp in the lecture where it&apos;s answered.
+        Ask a question. AI locates the exact timestamp in the lecture where it&apos;s answered.
       </p>
 
       <div className="relative mb-3 surface rounded-xl transition focus-within:border-opacity-80">
@@ -2597,7 +3148,7 @@ function FindTab({ lecture, onSeek, onUsed }: { lecture: StructuredLecture; onSe
         })()}
         {!result && !loading && !error && (
           <div className="text-center py-14 text-sm border border-dashed rounded-xl" style={{ borderColor: "var(--border)", color: "var(--muted-foreground)" }}>
-            Type a question above — AI will find the exact moment in the lecture.
+            Type a question above. AI will find the exact moment in the lecture.
           </div>
         )}
       </AnimatePresence>
@@ -2605,25 +3156,35 @@ function FindTab({ lecture, onSeek, onUsed }: { lecture: StructuredLecture; onSe
   );
 }
 
-/* ─── Translate Tab ─── */
-// TranslateTab removed — focusing on English quality for v1
-
 // ──────────────────────────────────────────────────────────────────────────
-// QuizTab — multiple-choice game with score, streak and feedback
+// QuizTab
 // ──────────────────────────────────────────────────────────────────────────
 type QuizDifficulty = "easy" | "medium" | "hard";
 
-const QUIZ_Q_COUNT = 10; // quiz length is always 10, independent of flashcard count
+const QUIZ_Q_COUNT_BY_LEVEL: Record<string, number> = {
+  beginner:     8,
+  intermediate: 10,
+  advanced:     12,
+};
 
-function QuizTab({ materials, onCompleted }: { materials: StudyMaterials; onCompleted: (pct: number) => void }) {
+function QuizTab({ materials, skillLevel, onCompleted }: {
+  materials: StudyMaterials;
+  skillLevel?: SkillLevel;
+  onCompleted: (pct: number, weakTopics: string[]) => void;
+}) {
   const cards = useMemo(() => materials.flashcards.filter((c) => c.question && c.answer), [materials.flashcards]);
   const [difficulty, setDifficulty] = useState<QuizDifficulty | null>(null);
+  const [quizRound, setQuizRound] = useState(0);
 
-  // All modes show the QUESTION → pick the correct ANSWER. Difficulty = how misleading the distractors are.
-  // Capped at QUIZ_Q_COUNT so quiz length stays fixed regardless of how many flashcards exist.
+  const quizCount = QUIZ_Q_COUNT_BY_LEVEL[skillLevel ?? "intermediate"] ?? 10;
+
   const shuffledCards = useMemo(
-    () => [...cards].sort(() => Math.random() - 0.5).slice(0, Math.min(QUIZ_Q_COUNT, cards.length)),
-    [cards]
+    () => {
+      const sorted = [...cards].sort(() => Math.random() - 0.5);
+      return sorted.slice(0, Math.min(quizCount, cards.length));
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [cards, quizCount, quizRound]
   );
 
   const makeOptions = useCallback((card: typeof cards[0], idx: number, diff: QuizDifficulty): { options: string[]; correct: string } => {
@@ -2632,16 +3193,13 @@ function QuizTab({ materials, onCompleted }: { materials: StudyMaterials; onComp
 
     let distractors: string[];
     if (diff === "easy") {
-      // Easy: 3 random answers from anywhere in the deck
       distractors = [...others].sort(() => Math.random() - 0.5).slice(0, 3).map((c) => c.answer);
     } else if (diff === "medium") {
-      // Medium: prefer answers from the same section (more topically related → trickier)
       const sameSection = others.filter((c) => c.sectionTitle === card.sectionTitle);
       const rest = others.filter((c) => c.sectionTitle !== card.sectionTitle);
       const pool = [...sameSection.sort(() => Math.random() - 0.5), ...rest.sort(() => Math.random() - 0.5)];
       distractors = pool.slice(0, 3).map((c) => c.answer);
     } else {
-      // Hard: pick answers whose first word matches the correct answer's first word (tricky look-alike pool)
       const firstWord = correct.split(" ")[0].toLowerCase();
       const lookalike = others.filter((c) => c.answer.toLowerCase().startsWith(firstWord));
       const rest = others.filter((c) => !c.answer.toLowerCase().startsWith(firstWord));
@@ -2660,13 +3218,23 @@ function QuizTab({ materials, onCompleted }: { materials: StudyMaterials; onComp
   const [bestStreak, setBestStreak] = useState(0);
   const [done, setDone] = useState(false);
   const [results, setResults] = useState<boolean[]>([]);
+  const [wrongTopics, setWrongTopics] = useState<string[]>([]);
+  const [reasoning, setReasoning] = useState("");
+  const [reasoningSubmitted, setReasoningSubmitted] = useState(false);
 
   const total = shuffledCards.length;
   const pct = total > 0 ? Math.round((score / total) * 100) : 0;
 
+  const completedRef = useRef(false);
+  const onCompletedRef = useRef(onCompleted);
+  onCompletedRef.current = onCompleted;
+
   useEffect(() => {
-    if (done) onCompleted(pct);
-  }, [done, pct, onCompleted]);
+    if (done && !completedRef.current) {
+      completedRef.current = true;
+      onCompletedRef.current(pct, [...new Set(wrongTopics)]);
+    }
+  }, [done, pct, wrongTopics]);
 
   useEffect(() => {
     if (!difficulty || !shuffledCards.length || qIdx >= shuffledCards.length) return;
@@ -2674,7 +3242,7 @@ function QuizTab({ materials, onCompleted }: { materials: StudyMaterials; onComp
     const { options: opts, correct } = makeOptions(card, cards.indexOf(card), difficulty);
     setOptions(opts);
     setCorrectAnswer(correct);
-  }, [qIdx, shuffledCards, makeOptions, cards, difficulty]);
+  }, [qIdx, difficulty, shuffledCards, makeOptions, cards]);
 
   const handleAnswer = (opt: string) => {
     if (selected) return;
@@ -2684,18 +3252,27 @@ function QuizTab({ materials, onCompleted }: { materials: StudyMaterials; onComp
     setStreak(newStreak);
     if (newStreak > bestStreak) setBestStreak(newStreak);
     if (correct) setScore((s) => s + 1);
+    else {
+      const card = shuffledCards[qIdx];
+      if (card?.sectionTitle) setWrongTopics((t) => [...t, card.sectionTitle]);
+    }
     setResults((r) => [...r, correct]);
   };
 
   const next = () => {
     if (qIdx + 1 >= shuffledCards.length) { setDone(true); return; }
     setSelected(null);
+    setReasoning("");
+    setReasoningSubmitted(false);
     setQIdx((i) => i + 1);
   };
 
   const restart = (newDiff?: QuizDifficulty) => {
     setQIdx(0); setSelected(null); setScore(0); setStreak(0);
-    setBestStreak(0); setDone(false); setResults([]);
+    setBestStreak(0); setDone(false); setResults([]); setWrongTopics([]);
+    setReasoning(""); setReasoningSubmitted(false);
+    completedRef.current = false;
+    setQuizRound((r) => r + 1);
     if (newDiff) setDifficulty(newDiff);
   };
 
@@ -2710,21 +3287,36 @@ function QuizTab({ materials, onCompleted }: { materials: StudyMaterials; onComp
 
   // ── Difficulty picker ──
   if (!difficulty) {
+    const suggestedDiff: QuizDifficulty =
+      skillLevel === "beginner" ? "easy" : skillLevel === "advanced" ? "hard" : "medium";
     return (
       <div className="max-w-lg mx-auto text-center py-8">
         <Trophy className="h-10 w-10 mx-auto mb-4" style={{ color: "var(--primary)" }} />
         <h3 className="font-serif text-3xl mb-2">Quick Quiz</h3>
-        <p className="text-sm mb-10" style={{ color: "var(--muted-foreground)" }}>
-          {cards.length} questions · Pick your difficulty
+        <p className="text-sm mb-2" style={{ color: "var(--muted-foreground)" }}>
+          {quizCount} questions · Pick your difficulty
         </p>
+        {skillLevel && (
+          <p className="text-[10px] font-mono uppercase tracking-wider mb-8" style={{ color: "var(--primary)" }}>
+            Suggested for your level: {suggestedDiff}
+          </p>
+        )}
+        {!skillLevel && <div className="mb-8" />}
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
           {([
             { d: "easy" as QuizDifficulty,   emoji: "🟢", label: "Easy",   desc: "Pick the right answer from clearly different choices." },
-            { d: "medium" as QuizDifficulty, emoji: "🟡", label: "Medium", desc: "Choices are from the same section — read carefully." },
+            { d: "medium" as QuizDifficulty, emoji: "🟡", label: "Medium", desc: "Choices are from the same section. Read carefully." },
             { d: "hard" as QuizDifficulty,   emoji: "🔴", label: "Hard",   desc: "All answers look similar. Only one is exactly right." },
           ]).map(({ d, emoji, label, desc }) => (
             <motion.button key={d} whileTap={{ scale: 0.96 }} onClick={() => setDifficulty(d)}
-              className="surface rounded-2xl p-5 text-left hover:shadow-card transition group">
+              className="surface rounded-2xl p-5 text-left hover:shadow-card transition group relative"
+              style={d === suggestedDiff && skillLevel ? { boxShadow: "0 0 0 2px var(--primary)" } : undefined}>
+              {d === suggestedDiff && skillLevel && (
+                <span className="absolute top-2 right-2 text-[9px] font-mono uppercase tracking-wider px-1.5 py-0.5 rounded-full"
+                  style={{ background: "color-mix(in oklab, var(--primary) 15%, transparent)", color: "var(--primary)" }}>
+                  Suggested
+                </span>
+              )}
               <div className="text-2xl mb-3">{emoji}</div>
               <div className="font-semibold mb-1">{label}</div>
               <p className="text-xs leading-relaxed" style={{ color: "var(--muted-foreground)" }}>{desc}</p>
@@ -2740,6 +3332,7 @@ function QuizTab({ materials, onCompleted }: { materials: StudyMaterials; onComp
     const grade = pct >= 80 ? { emoji: "🏆", label: "Outstanding!", color: "var(--success)" }
       : pct >= 60 ? { emoji: "⭐", label: "Good job!", color: "var(--primary)" }
       : { emoji: "📚", label: "Keep studying!", color: "var(--warning)" };
+    const uniqueWeakTopics = [...new Set(wrongTopics)];
     return (
       <motion.div initial={{ opacity: 0, scale: 0.97 }} animate={{ opacity: 1, scale: 1 }} className="text-center py-8 max-w-lg mx-auto">
         <div className="text-5xl mb-4">{grade.emoji}</div>
@@ -2764,20 +3357,39 @@ function QuizTab({ materials, onCompleted }: { materials: StudyMaterials; onComp
         </div>
 
         {/* Per-question recap */}
-        <div className="grid grid-cols-5 gap-1.5 mb-8 justify-center">
+        <div className="grid grid-cols-5 gap-1.5 mb-6 justify-center">
           {results.map((r, i) => (
             <div key={i} className="h-2 rounded-full" style={{ background: r ? "var(--success)" : "var(--destructive)" }} />
           ))}
         </div>
 
+        {/* Topics to focus on */}
+        {uniqueWeakTopics.length > 0 && (
+          <div className="text-left surface rounded-xl p-4 mb-8">
+            <p className="text-xs font-semibold uppercase tracking-wider mb-2" style={{ color: "var(--destructive)" }}>Topics to revisit</p>
+            <ul className="space-y-1">
+              {uniqueWeakTopics.map((t) => (
+                <li key={t} className="text-sm flex items-center gap-2" style={{ color: "var(--muted-foreground)" }}>
+                  <span className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ background: "var(--destructive)" }} />
+                  {t}
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+
         <div className="flex flex-wrap justify-center gap-3">
           <button onClick={() => restart()} className="inline-flex items-center gap-2 px-6 py-3 rounded-xl text-sm font-medium hover:opacity-90 transition"
             style={{ background: "var(--foreground)", color: "var(--background)" }}>
-            <RotateCcw className="h-4 w-4" /> Same difficulty
+            <RotateCcw className="h-4 w-4" /> More questions
           </button>
           <button onClick={() => restart(difficulty === "easy" ? "medium" : difficulty === "medium" ? "hard" : "easy")}
             className="inline-flex items-center gap-2 px-6 py-3 rounded-xl text-sm font-medium hover:opacity-90 transition surface">
             Try {difficulty === "hard" ? "easy" : difficulty === "medium" ? "hard" : "medium"}
+          </button>
+          <button onClick={() => { setDifficulty(null); restart(); }}
+            className="inline-flex items-center gap-2 px-6 py-3 rounded-xl text-sm font-medium hover:opacity-90 transition surface">
+            Change difficulty
           </button>
         </div>
       </motion.div>
@@ -2822,7 +3434,7 @@ function QuizTab({ materials, onCompleted }: { materials: StudyMaterials; onComp
             <p className="text-lg sm:text-xl font-medium leading-relaxed">{q.question}</p>
             {difficulty === "hard" && (
               <p className="text-[10px] font-mono uppercase tracking-wider mt-2" style={{ color: "var(--warning)" }}>
-                ⚠ All options look similar — choose precisely
+                ⚠ All options look similar, choose precisely
               </p>
             )}
           </div>
@@ -2853,14 +3465,56 @@ function QuizTab({ materials, onCompleted }: { materials: StudyMaterials; onComp
           </div>
 
           {selected && (
-            <motion.div initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} className="mt-6 flex items-center justify-between">
-              <p className="text-sm" style={{ color: "var(--muted-foreground)" }}>
-                {selected === correctAnswer ? "✅ Correct!" : `❌ Answer: ${correctAnswer}`}
-              </p>
-              <button onClick={next} className="flex items-center gap-1.5 px-5 py-2.5 rounded-xl text-sm font-medium hover:opacity-90 transition"
-                style={{ background: "var(--foreground)", color: "var(--background)" }}>
-                {qIdx + 1 >= total ? "See results" : "Next"} <ArrowRight className="h-3.5 w-3.5" />
-              </button>
+            <motion.div initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} className="mt-6 space-y-3">
+              {/* Show correct answer explanation */}
+              <div className="rounded-xl border p-4" style={{
+                borderColor: selected === correctAnswer
+                  ? "color-mix(in oklab, var(--success) 40%, transparent)"
+                  : "color-mix(in oklab, var(--destructive) 40%, transparent)",
+                background: selected === correctAnswer
+                  ? "color-mix(in oklab, var(--success) 6%, transparent)"
+                  : "color-mix(in oklab, var(--destructive) 6%, transparent)"
+              }}>
+                <p className="text-sm font-medium mb-1" style={{ color: selected === correctAnswer ? "var(--success)" : "var(--destructive)" }}>
+                  {selected === correctAnswer ? "✅ Correct!" : "❌ Incorrect"}
+                </p>
+                {selected !== correctAnswer && (
+                  <p className="text-sm" style={{ color: "var(--muted-foreground)" }}>
+                    The correct answer is: <span className="font-medium" style={{ color: "var(--foreground)" }}>{correctAnswer}</span>
+                  </p>
+                )}
+              </div>
+
+              {/* Advanced: reasoning box shown when answer is wrong */}
+              {skillLevel === "advanced" && selected !== correctAnswer && !reasoningSubmitted && (
+                <div className="rounded-xl border p-4" style={{ borderColor: "color-mix(in oklab, var(--warning) 40%, transparent)", background: "color-mix(in oklab, var(--warning) 6%, transparent)" }}>
+                  <p className="text-xs font-mono uppercase tracking-wider mb-2" style={{ color: "var(--warning)" }}>
+                    ✦ Explain your reasoning: what led you to that choice?
+                  </p>
+                  <textarea
+                    className="w-full rounded-lg border bg-transparent text-sm p-2.5 resize-none outline-none focus:ring-1"
+                    style={{ borderColor: "var(--border)", color: "var(--foreground)", minHeight: "72px" }}
+                    placeholder="Write a sentence or two..."
+                    value={reasoning}
+                    onChange={(e) => setReasoning(e.target.value)}
+                  />
+                  <button
+                    onClick={() => setReasoningSubmitted(true)}
+                    className="mt-2 text-xs font-medium px-3 py-1.5 rounded-lg transition hover:opacity-80"
+                    style={{ background: "var(--foreground)", color: "var(--background)" }}
+                  >
+                    Submit reflection
+                  </button>
+                </div>
+              )}
+              <div className="flex items-center justify-end">
+                {(skillLevel !== "advanced" || selected === correctAnswer || reasoningSubmitted) && (
+                  <button onClick={next} className="flex items-center gap-1.5 px-5 py-2.5 rounded-xl text-sm font-medium hover:opacity-90 transition"
+                    style={{ background: "var(--foreground)", color: "var(--background)" }}>
+                    {qIdx + 1 >= total ? "See results" : "Next"} <ArrowRight className="h-3.5 w-3.5" />
+                  </button>
+                )}
+              </div>
             </motion.div>
           )}
         </motion.div>
@@ -2874,7 +3528,7 @@ function QuizTab({ materials, onCompleted }: { materials: StudyMaterials; onComp
 // ──────────────────────────────────────────────────────────────────────────
 type ConfidenceLevel = "know" | "fuzzy" | "no";
 
-function InsightsTab({ insights, concepts, onSeek }: { insights?: LectureInsights; concepts: string[]; onSeek: (s: number) => void }) {
+function InsightsTab({ insights, concepts, onSeek, weakTopics }: { insights?: LectureInsights; concepts: string[]; onSeek: (s: number) => void; weakTopics?: string[] }) {
   const [confidence, setConfidence] = useState<Record<string, ConfidenceLevel>>({});
 
   const difficultyColor = { easy: "var(--success)", medium: "var(--warning)", hard: "var(--destructive)" } as const;
@@ -2909,7 +3563,7 @@ function InsightsTab({ insights, concepts, onSeek }: { insights?: LectureInsight
             <button onClick={() => setConfidence({})} className="text-[10px] font-mono uppercase tracking-wider hover:opacity-70 transition" style={{ color: "var(--muted-foreground)" }}>Reset</button>
           )}
         </div>
-        <p className="text-xs mb-4" style={{ color: "var(--muted-foreground)" }}>Tap each concept to rate your confidence — your study list updates live.</p>
+        <p className="text-xs mb-4" style={{ color: "var(--muted-foreground)" }}>Tap each concept to rate your confidence. Your study list updates live.</p>
 
         {/* Progress bar */}
         {rated > 0 && (
@@ -2957,6 +3611,19 @@ function InsightsTab({ insights, concepts, onSeek }: { insights?: LectureInsight
         {rated === total && noCount === 0 && fuzzyCount === 0 && (
           <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="mt-4 text-center py-3 rounded-xl text-sm" style={{ background: "color-mix(in oklab, var(--success) 12%, transparent)", color: "var(--success)" }}>
             🎉 You know all {total} concepts! Great work.
+          </motion.div>
+        )}
+
+        {/* Quiz weak topics */}
+        {weakTopics && weakTopics.length > 0 && (
+          <motion.div initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} className="mt-5 surface rounded-xl p-4">
+            <div className="text-[10px] font-mono uppercase tracking-wider mb-3" style={{ color: "var(--destructive)" }}>Quiz: Topics to revisit</div>
+            <p className="text-xs mb-3" style={{ color: "var(--muted-foreground)" }}>Based on your quiz answers, focus on these sections:</p>
+            <div className="flex flex-wrap gap-2">
+              {weakTopics.map((t) => (
+                <span key={t} className="text-xs px-2.5 py-1 rounded-md" style={{ background: "color-mix(in oklab, var(--destructive) 12%, transparent)", color: "var(--destructive)" }}>⚠ {t}</span>
+              ))}
+            </div>
           </motion.div>
         )}
       </div>
@@ -3281,12 +3948,13 @@ const STARTER_QUESTIONS = [
   "Give me a 30-second recap.",
 ];
 
-function ChatTab({ result, materials, initialHistory, onHistoryChange, onUsed }: {
+function ChatTab({ result, materials, initialHistory, onHistoryChange, onUsed, skillLevel }: {
   result: ProcessResult;
   materials: StudyMaterials;
   initialHistory: ChatMessage[];
   onHistoryChange: (h: ChatMessage[]) => void;
   onUsed: () => void;
+  skillLevel?: SkillLevel;
 }) {
   const [messages, setMessages] = useState<ChatMessage[]>(initialHistory);
   const [input, setInput] = useState("");
@@ -3320,7 +3988,7 @@ function ChatTab({ result, materials, initialHistory, onHistoryChange, onUsed }:
       const res = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ messages: history, context }),
+        body: JSON.stringify({ messages: history, context, skillLevel, videoId: result.videoId }),
       });
       if (!res.ok || !res.body) throw new Error("Chat request failed");
 
@@ -3353,7 +4021,18 @@ function ChatTab({ result, materials, initialHistory, onHistoryChange, onUsed }:
           <MessageCircle className="h-4 w-4" style={{ color: "var(--primary)" }} />
         </div>
         <div className="flex-1 min-w-0">
-          <div className="font-medium text-sm">Lecture Assistant</div>
+          <div className="font-medium text-sm flex items-center gap-2">
+            Lecture Assistant
+            {skillLevel && (
+              <span className="text-[9px] font-mono uppercase tracking-wider px-1.5 py-0.5 rounded-full"
+                style={{
+                  background: skillLevel === "beginner" ? "color-mix(in oklab, var(--success) 12%, transparent)" : skillLevel === "advanced" ? "color-mix(in oklab, var(--warning) 12%, transparent)" : "color-mix(in oklab, var(--primary) 12%, transparent)",
+                  color: skillLevel === "beginner" ? "var(--success)" : skillLevel === "advanced" ? "var(--warning)" : "var(--primary)",
+                }}>
+                {skillLevel}
+              </span>
+            )}
+          </div>
           <div className="text-[11px]" style={{ color: "var(--muted-foreground)" }}>Powered by Claude Sonnet 4.6 · {messages.length > 0 ? `${Math.floor(messages.length / 2)} exchanges saved` : "Ask anything about this lecture"}</div>
         </div>
         {messages.length > 0 && (
@@ -3374,7 +4053,7 @@ function ChatTab({ result, materials, initialHistory, onHistoryChange, onUsed }:
               </div>
               <p className="font-serif text-xl mb-1">Hi, I&apos;m Owlbert.</p>
               <p className="text-sm" style={{ color: "var(--muted-foreground)" }}>
-                I&apos;ve read the full transcript. Ask anything — I&apos;ll explain it clearly and cite timestamps.
+                I&apos;ve read the full transcript. Ask anything and I&apos;ll explain it clearly with timestamps.
               </p>
             </div>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">

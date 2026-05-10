@@ -4,6 +4,7 @@ import "./globals.css";
 import { ConfettiHost } from "./components/Confetti";
 import { CursorGlow } from "./components/CursorGlow";
 import { AmbientBlobs } from "./components/AmbientBlobs";
+import { SessionProvider } from "next-auth/react";
 
 const inter = Inter({ subsets: ["latin"], variable: "--font-inter" });
 
@@ -28,10 +29,12 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         />
       </head>
       <body className={`${inter.variable} antialiased`}>
-        {children}
-        <CursorGlow />
-        <AmbientBlobs />
-        <ConfettiHost />
+        <SessionProvider>
+          {children}
+          <CursorGlow />
+          <AmbientBlobs />
+          <ConfettiHost />
+        </SessionProvider>
       </body>
     </html>
   );
