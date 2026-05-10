@@ -51,13 +51,13 @@ export interface DailyQuest {
 const QUEST_DEFINITIONS: Omit<DailyQuest, "progress" | "completed">[] = [
   { id: "explore3",  title: "Explore 3 chapters",    target: 3,  reward: 30 },
   { id: "flash5",    title: "Review 5 flashcards",   target: 5,  reward: 25 },
-  { id: "chat1",     title: "Ask Owlbert anything",  target: 1,  reward: 15 },
+  { id: "chat1",     title: "Ask Lecturemate anything",  target: 1,  reward: 15 },
   { id: "quiz80",    title: "Score 80%+ on the quiz", target: 1, reward: 50 },
 ];
 
 // ── Persistence ──────────────────────────────────────────────────────────────
 
-const STORAGE_KEY = "studyai_xp_v1";
+const STORAGE_KEY = "lecturemate_xp_v1";
 
 export interface XPState {
   totalXP:    number;
@@ -78,7 +78,14 @@ export function loadXPState(): XPState {
     return { totalXP: 0, quests: freshQuests(), questDate: todayStr() };
   }
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
+    let raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) {
+      const legacy = localStorage.getItem("studyai_xp_v1");
+      if (legacy) {
+        localStorage.setItem(STORAGE_KEY, legacy);
+        raw = legacy;
+      }
+    }
     if (!raw) return { totalXP: 0, quests: freshQuests(), questDate: todayStr() };
     const parsed = JSON.parse(raw) as XPState;
     // Reset quests if it's a new day

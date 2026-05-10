@@ -1,7 +1,7 @@
 import { NextRequest } from "next/server";
 import { streamChat } from "@/lib/bedrock";
 import { Message } from "@aws-sdk/client-bedrock-runtime";
-import { buildStudyAISystemPrompt, runStudyChatGraph } from "@/lib/langgraph/studyChatGraph";
+import { buildLecturemateSystemPrompt, runLecturemateChatGraph } from "@/lib/langgraph/lecturemateChatGraph";
 
 export const maxDuration = 60;
 
@@ -26,7 +26,7 @@ export async function POST(req: NextRequest) {
 
     let systemPrompt: string;
     if (videoId && typeof videoId === "string") {
-      const out = await runStudyChatGraph({
+      const out = await runLecturemateChatGraph({
         messages,
         videoId,
         skillLevel,
@@ -34,7 +34,7 @@ export async function POST(req: NextRequest) {
       });
       systemPrompt = out.systemPrompt;
     } else {
-      systemPrompt = buildStudyAISystemPrompt(context, skillLevel, "");
+      systemPrompt = buildLecturemateSystemPrompt(context, skillLevel, "");
     }
 
     // Convert to Bedrock Message format

@@ -5,7 +5,7 @@ import { signIn } from "next-auth/react";
 import { useEffect, useState } from "react";
 import { Mascot } from "@/app/components/Mascot";
 import { AnimatedBackground } from "@/app/components/AnimatedBackground";
-const GUEST_KEY = "studyai_guest_confirmed";
+const GUEST_KEY = "lecturemate_guest_confirmed";
 
 interface SignInGateProps {
   /**
@@ -76,7 +76,7 @@ export function SignInGate({ phase, onContinue }: SignInGateProps) {
               className="text-[10px] font-mono uppercase tracking-[0.22em] mb-3"
               style={{ color: "var(--primary)" }}
             >
-              StudyAI
+              Lecturemate AI
             </p>
 
             {/* Headline */}

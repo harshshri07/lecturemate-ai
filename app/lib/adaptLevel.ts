@@ -34,7 +34,7 @@ const LEVEL_THRESHOLDS = {
   intermediate: 45,
 } as const;
 
-const LEARNER_PROFILE_KEY = "studyai_learner";
+const LEARNER_PROFILE_KEY = "lecturemate_learner";
 
 /** Map a weighted score to a SkillLevel. */
 export function scoreToLevel(weightedScore: number): SkillLevel {
@@ -85,7 +85,14 @@ export function adaptLevel(
 export function loadLearnerProfile(): LearnerProfile {
   if (typeof window === "undefined") return createDefaultProfile();
   try {
-    const raw = localStorage.getItem(LEARNER_PROFILE_KEY);
+    let raw = localStorage.getItem(LEARNER_PROFILE_KEY);
+    if (!raw) {
+      const legacy = localStorage.getItem("studyai_learner");
+      if (legacy) {
+        localStorage.setItem(LEARNER_PROFILE_KEY, legacy);
+        raw = legacy;
+      }
+    }
     if (!raw) return createDefaultProfile();
     const parsed = JSON.parse(raw) as Partial<LearnerProfile>;
     return {

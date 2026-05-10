@@ -1,5 +1,5 @@
 -- ============================================================
--- StudyAI — Supabase Schema  (JWT-only, no Auth.js adapter)
+-- Lecturemate AI — Supabase Schema  (JWT-only, no Auth.js adapter)
 -- Run this entire file in the Supabase SQL Editor
 -- (Dashboard → SQL Editor → New query → paste → Run)
 -- ============================================================

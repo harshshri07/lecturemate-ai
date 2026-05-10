@@ -16,7 +16,7 @@ type Particle = {
 
 /**
  * Tiny canvas confetti — no dependency.
- * Trigger via `celebrate(x, y)` or dispatch `studyai:confetti`.
+ * Trigger via `celebrate(x, y)` or dispatch `lecturemate:confetti`.
  */
 export function ConfettiHost() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -79,10 +79,10 @@ export function ConfettiHost() {
       }
     };
 
-    window.addEventListener("studyai:confetti", onBurst);
+    window.addEventListener("lecturemate:confetti", onBurst);
     return () => {
       window.removeEventListener("resize", resize);
-      window.removeEventListener("studyai:confetti", onBurst);
+      window.removeEventListener("lecturemate:confetti", onBurst);
       if (rafRef.current) cancelAnimationFrame(rafRef.current);
     };
   }, []);
@@ -92,6 +92,6 @@ export function ConfettiHost() {
 
 export function celebrate(x?: number, y?: number) {
   if (typeof window === "undefined") return;
-  window.dispatchEvent(new CustomEvent("studyai:confetti", { detail: { x, y } }));
+  window.dispatchEvent(new CustomEvent("lecturemate:confetti", { detail: { x, y } }));
 }
 

@@ -9,10 +9,10 @@ import { SessionProvider } from "next-auth/react";
 const inter = Inter({ subsets: ["latin"], variable: "--font-inter" });
 
 export const metadata: Metadata = {
-  title: "StudyAI — Turn any lecture into your study kit",
+  title: "Lecturemate AI — Turn any lecture into your study kit",
   description: "Paste a YouTube URL. Four AI agents extract, structure, summarize, and index the entire video into a study workspace you can actually use.",
   openGraph: {
-    title: "StudyAI — Turn any lecture into your study kit",
+    title: "Lecturemate AI — Turn any lecture into your study kit",
     description: "AI-powered study companion built on Amazon Bedrock",
   },
 };

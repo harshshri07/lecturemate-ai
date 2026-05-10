@@ -1,36 +1,70 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Lecturemate AI
 
-## Getting Started
+Turn YouTube lectures into a structured study workspace: outline, summaries, flashcards, quiz, insights, chat, and timestamped search. Optional Google sign-in syncs data to Supabase; guest mode stays on the device.
 
-First, run the development server:
+## Features
 
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
-```
+- **Student mode** – Process a lecture URL, watch with chapter rail, track progress, XP and daily quests.
+- **Chat** – Streaming assistant (AWS Bedrock Claude) with lecture context; optional **RAG** pulls transcript chunks from Supabase pgvector when configured.
+- **Find** – Question-based search with transcript grounding.
+- **Faculty / Provost** – Optional audit and curriculum map flows (unlock in app).
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+## Stack
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+- **Next.js 16** (App Router), React 19, Tailwind CSS
+- **AWS Bedrock** – Claude (chat, agents), Titan Text Embeddings v2 (RAG), Nova Micro (search)
+- **Supabase** – Postgres, optional **pgvector** for `lecture_chunks`
+- **Auth.js v5** – Google OAuth (JWT sessions)
+- **LangGraph** – Retrieve-then-compose step before chat when `videoId` and vector store are available
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+## Prerequisites
 
-## Learn More
+- Node.js 20+
+- AWS account with Bedrock model access (Claude, Titan Embeddings v2, and any models your agents use)
+- Supabase project (for cloud sync and optional RAG)
 
-To learn more about Next.js, take a look at the following resources:
+## Setup
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+1. Clone and install:
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+   ```powershell
+   git clone <your-repo-url> lecturemate-ai
+   cd lecturemate-ai
+   npm install
+   ```
 
-## Deploy on Vercel
+2. Environment – copy `.env.example` to `.env.local` and fill values:
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+   - `AWS_*` for Bedrock
+   - `AUTH_SECRET`, `AUTH_GOOGLE_ID`, `AUTH_GOOGLE_SECRET` for sign-in
+   - `NEXT_PUBLIC_SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` (and anon key if you use it client-side)
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+3. Database – in the Supabase SQL editor, run:
+
+   - `supabase/schema.sql` (app tables)
+   - `supabase/migrations/002_rag_lecture_chunks.sql` (only if you want RAG chat indexing)
+
+4. Dev server:
+
+   ```powershell
+   npm run dev
+   ```
+
+   Open [http://localhost:3000](http://localhost:3000).
+
+## Scripts
+
+| Command         | Description        |
+| --------------- | ------------------ |
+| `npm run dev`   | Development server |
+| `npm run build` | Production build   |
+| `npm run start` | Production server  |
+| `npm run lint`  | ESLint             |
+
+## Deploy
+
+Configure the same environment variables on your host (e.g. Vercel). Ensure Bedrock is reachable from that region and Supabase RLS/service-role usage matches your API routes.
+
+## License
+
+Private / team use unless you add a public license.

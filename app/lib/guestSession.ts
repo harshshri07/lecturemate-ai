@@ -4,9 +4,9 @@
  * - Rate limiting: 1 URL per day for guests, 5 URLs per day for signed-in users
  */
 
-const GUEST_CHAT_KEY = "studyai_guest_chat";
-const GUEST_RATE_LIMIT_KEY = "studyai_guest_rate_limit";
-const SIGNED_IN_RATE_LIMIT_KEY = "studyai_signed_in_rate_limit";
+const GUEST_CHAT_KEY = "lecturemate_guest_chat";
+const GUEST_RATE_LIMIT_KEY = "lecturemate_guest_rate_limit";
+const SIGNED_IN_RATE_LIMIT_KEY = "lecturemate_signed_in_rate_limit";
 
 export interface GuestChatMessage {
   id: string;
@@ -25,7 +25,14 @@ export interface RateLimitEntry {
  */
 export function getGuestChatHistory(): GuestChatMessage[] {
   try {
-    const data = sessionStorage.getItem(GUEST_CHAT_KEY);
+    let data = sessionStorage.getItem(GUEST_CHAT_KEY);
+    if (!data) {
+      const legacy = sessionStorage.getItem("studyai_guest_chat");
+      if (legacy) {
+        sessionStorage.setItem(GUEST_CHAT_KEY, legacy);
+        data = legacy;
+      }
+    }
     return data ? JSON.parse(data) : [];
   } catch {
     return [];
@@ -114,7 +121,14 @@ export function canUseUrl(url: string, isSignedIn: boolean): { allowed: boolean;
   const key = SIGNED_IN_RATE_LIMIT_KEY;
 
   try {
-    const data = localStorage.getItem(key);
+    let data = localStorage.getItem(key);
+    if (!data) {
+      const legacy = localStorage.getItem("studyai_signed_in_rate_limit");
+      if (legacy) {
+        localStorage.setItem(key, legacy);
+        data = legacy;
+      }
+    }
     const entries: RateLimitEntry[] = data ? JSON.parse(data) : [];
 
     const now = Date.now();

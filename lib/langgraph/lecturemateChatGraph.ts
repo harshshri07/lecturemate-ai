@@ -9,7 +9,7 @@ export type LectureChatContext = {
   concepts: string[];
 };
 
-const StudyChatState = Annotation.Root({
+const LecturemateChatState = Annotation.Root({
   messages: Annotation<{ role: string; content: string }[]>(),
   videoId: Annotation<string>(),
   skillLevel: Annotation<string | undefined>(),
@@ -28,7 +28,7 @@ function skillLevelInstructions(skillLevel?: string): string {
   return "\n- STUDENT LEVEL: Intermediate. Assume basic familiarity with the topic. Be concise, skip trivial definitions unless asked.";
 }
 
-export function buildStudyAISystemPrompt(
+export function buildLecturemateSystemPrompt(
   context: LectureChatContext,
   skillLevel: string | undefined,
   retrievalContext: string
@@ -42,7 +42,7 @@ export function buildStudyAISystemPrompt(
       ? `TRANSCRIPT EXCERPTS (retrieved for this question; cite these when relevant):\n${retrievalContext}\n`
       : "";
 
-  return `You are StudyAI, a knowledgeable study assistant helping a student understand a YouTube lecture.
+  return `You are Lecturemate AI, a knowledgeable study assistant helping a student understand a YouTube lecture.
 
 LECTURE: "${context.title}" by ${context.channelName}
 
@@ -66,22 +66,22 @@ INSTRUCTIONS:
 - NEVER use em dashes (the long dash character). Use commas, periods, or colons instead${skillLevelInstructions(skillLevel)}`;
 }
 
-async function retrieveNode(state: typeof StudyChatState.State): Promise<Partial<typeof StudyChatState.Update>> {
+async function retrieveNode(state: typeof LecturemateChatState.State): Promise<Partial<typeof LecturemateChatState.Update>> {
   const last = [...state.messages].reverse().find((m) => m.role === "user");
   const q = last?.content ?? "";
   const retrieved = await retrieveLectureContext(state.videoId, q, 8);
   return { retrievalContext: retrieved };
 }
 
-async function composeNode(state: typeof StudyChatState.State): Promise<Partial<typeof StudyChatState.Update>> {
-  const prompt = buildStudyAISystemPrompt(state.context, state.skillLevel, state.retrievalContext);
+async function composeNode(state: typeof LecturemateChatState.State): Promise<Partial<typeof LecturemateChatState.Update>> {
+  const prompt = buildLecturemateSystemPrompt(state.context, state.skillLevel, state.retrievalContext);
   return { systemPrompt: prompt };
 }
 
 let compiledGraph: ReturnType<typeof buildCompiledGraph> | null = null;
 
 function buildCompiledGraph() {
-  return new StateGraph(StudyChatState)
+  return new StateGraph(LecturemateChatState)
     .addNode("retrieve", retrieveNode)
     .addNode("compose", composeNode)
     .addEdge(START, "retrieve")
@@ -90,7 +90,7 @@ function buildCompiledGraph() {
     .compile();
 }
 
-export async function runStudyChatGraph(input: {
+export async function runLecturemateChatGraph(input: {
   messages: { role: string; content: string }[];
   videoId: string;
   skillLevel?: string;

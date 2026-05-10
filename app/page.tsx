@@ -162,8 +162,8 @@ function renderChatMarkdown(text: string): React.ReactNode {
   return <>{nodes}</>;
 }
 
-/** StudyAI logo SVG */
-function StudyAILogo({ size = 28 }: { size?: number }) {
+/** Lecturemate AI logo SVG */
+function LecturemateLogo({ size = 28 }: { size?: number }) {
   return (
     <svg width={size} height={size} viewBox="0 0 32 32" fill="none">
       <rect width="32" height="32" rx="8" fill="var(--foreground)" />
@@ -195,12 +195,12 @@ interface SavedLecture {
   chatHistory: ChatMessage[];
 }
 
-const STORAGE_KEY = "studyai_lectures";
-const LAST_SESSION_KEY = "studyai_last_session";
-const CREATOR_UNLOCK_KEY = "studyai_creator_unlocked";
-const FACULTY_CACHE_KEY = "studyai_faculty_cache";
-const PROVOST_CACHE_KEY = "studyai_provost_cache";
-const PROGRESS_PREFIX = "studyai_progress:";
+const STORAGE_KEY = "lecturemate_lectures";
+const LAST_SESSION_KEY = "lecturemate_last_session";
+const CREATOR_UNLOCK_KEY = "lecturemate_creator_unlocked";
+const FACULTY_CACHE_KEY = "lecturemate_faculty_cache";
+const PROVOST_CACHE_KEY = "lecturemate_provost_cache";
+const PROGRESS_PREFIX = "lecturemate_progress:";
 const MAX_SAVED = 10;
 /** Recents + last-session restore expire after 7 days */
 const TTL_MS = 7 * 24 * 60 * 60 * 1000;
@@ -228,9 +228,14 @@ function sectionWatchThresholdSec(sections: { startTime: number; endTime: number
 
 function loadProgress(videoId: string): LectureProgress {
   const key = `${PROGRESS_PREFIX}${videoId}`;
-  const raw = loadJson<LectureProgress>(key);
+  let raw = loadJson<LectureProgress>(key);
+  let fromLegacy = false;
+  if (!raw) {
+    raw = loadJson<LectureProgress>(`studyai_progress:${videoId}`);
+    fromLegacy = !!raw;
+  }
   if (!raw) return DEFAULT_PROGRESS;
-  return {
+  const normalized: LectureProgress = {
     ...DEFAULT_PROGRESS,
     ...raw,
     sectionsCompleted: uniq(Array.isArray(raw.sectionsCompleted) ? raw.sectionsCompleted : []),
@@ -241,6 +246,8 @@ function loadProgress(videoId: string): LectureProgress {
     chatUsed: Boolean(raw.chatUsed),
     searchUsed: Boolean(raw.searchUsed),
   };
+  if (fromLegacy) saveProgress(videoId, normalized);
+  return normalized;
 }
 
 function saveProgress(videoId: string, value: LectureProgress) {
@@ -307,8 +314,37 @@ function saveJson(key: string, value: unknown) {
   try { localStorage.setItem(key, JSON.stringify(value)); } catch { /* ignore */ }
 }
 
+let legacyLectureKeysMigrated = false;
+function migrateLegacyLectureListKeys() {
+  if (typeof window === "undefined" || legacyLectureKeysMigrated) return;
+  legacyLectureKeysMigrated = true;
+  try {
+    if (!localStorage.getItem(STORAGE_KEY)) {
+      const old = localStorage.getItem("studyai_lectures");
+      if (old) localStorage.setItem(STORAGE_KEY, old);
+    }
+    if (!localStorage.getItem(LAST_SESSION_KEY)) {
+      const old = localStorage.getItem("studyai_last_session");
+      if (old) localStorage.setItem(LAST_SESSION_KEY, old);
+    }
+    if (!localStorage.getItem(FACULTY_CACHE_KEY)) {
+      const old = localStorage.getItem("studyai_faculty_cache");
+      if (old) localStorage.setItem(FACULTY_CACHE_KEY, old);
+    }
+    if (!localStorage.getItem(PROVOST_CACHE_KEY)) {
+      const old = localStorage.getItem("studyai_provost_cache");
+      if (old) localStorage.setItem(PROVOST_CACHE_KEY, old);
+    }
+    if (!localStorage.getItem(CREATOR_UNLOCK_KEY)) {
+      const old = localStorage.getItem("studyai_creator_unlocked");
+      if (old) localStorage.setItem(CREATOR_UNLOCK_KEY, old);
+    }
+  } catch { /* ignore */ }
+}
+
 function loadSavedLectures(): SavedLecture[] {
   if (typeof window === "undefined") return [];
+  migrateLegacyLectureListKeys();
   try {
     const parsed = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "[]") as SavedLecture[];
     if (!Array.isArray(parsed)) return [];
@@ -457,7 +493,9 @@ export default function Home() {
   useEffect(() => {
     // Check localStorage immediately (synchronous) — fastest path
     const guestConfirmed = (() => {
-      try { return !!localStorage.getItem("studyai_guest_confirmed"); } catch { return false; }
+      try {
+        return !!(localStorage.getItem("lecturemate_guest_confirmed") || localStorage.getItem("studyai_guest_confirmed"));
+      } catch { return false; }
     })();
 
     if (isSignedIn || guestConfirmed) {
@@ -769,9 +807,10 @@ export default function Home() {
   // view key schema: "home" | "student-dashboard" | "faculty-form" | "faculty-loading" | "faculty-report" | "provost-form" | "provost-loading" | "provost-report"
 
   const pushView = useCallback((view: string, extra?: Record<string, unknown>) => {
-    const cur = window.history.state as null | { studyai?: boolean; view?: string };
-    if (!cur?.studyai || cur.view !== view) {
-      window.history.pushState({ studyai: true, view, ...extra }, "", window.location.pathname);
+    const cur = window.history.state as null | { lecturemate?: boolean; studyai?: boolean; view?: string };
+    const inApp = cur?.lecturemate || cur?.studyai;
+    if (!inApp || cur.view !== view) {
+      window.history.pushState({ lecturemate: true, view, ...extra }, "", window.location.pathname);
     }
   }, []);
 
@@ -804,8 +843,8 @@ export default function Home() {
   // Handle back-swipe / forward-swipe for all modes
   useEffect(() => {
     const onPop = (e: PopStateEvent) => {
-      const st = e.state as null | { studyai?: boolean; view?: string; videoId?: string };
-      if (!st?.studyai) {
+      const st = e.state as null | { lecturemate?: boolean; studyai?: boolean; view?: string; videoId?: string };
+      if (!st?.lecturemate && !st?.studyai) {
         // Landed on the "home" entry (before any push) → reset everything
         setResult(null); setStudyMaterials(null); setChatHistory([]);
         setStage("idle"); setError(null); setAppMode("student");
@@ -922,7 +961,7 @@ export default function Home() {
       if (cancelled) return;
 
       // Wait for DOM element to exist
-      const el = document.getElementById("studyai-yt-player");
+      const el = document.getElementById("lecturemate-yt-player");
       if (!el) {
         // Retry after a short delay - the div might not be rendered yet
         setTimeout(() => { if (!cancelled) initPlayer(); }, 300);
@@ -933,7 +972,7 @@ export default function Home() {
         ytPlayerRef.current?.destroy?.();
       } catch { /* ignore */ }
 
-      ytPlayerRef.current = new (window as any).YT.Player("studyai-yt-player", {
+      ytPlayerRef.current = new (window as any).YT.Player("lecturemate-yt-player", {
         videoId: result.videoId,
         width: "100%",
         height: "100%",
@@ -1024,12 +1063,12 @@ export default function Home() {
       // Small delay to ensure DOM is ready after React render
       setTimeout(initPlayer, 100);
     } else {
-      const existing = document.querySelector<HTMLScriptElement>("script[data-studyai-yt]");
+      const existing = document.querySelector<HTMLScriptElement>("script[data-lecturemate-yt]");
       if (!existing) {
         const s = document.createElement("script");
         s.src = "https://www.youtube.com/iframe_api";
         s.async = true;
-        s.dataset.studyaiYt = "1";
+        s.dataset.lecturemateYt = "1";
         document.head.appendChild(s);
       }
 
@@ -1228,7 +1267,7 @@ export default function Home() {
     const code = unlockCode.trim().toLowerCase();
     // Hackathon-grade gating: keeps these modes out of the student flow by default.
     // Not security; just prevents accidental student access in demos.
-    if (code !== "studyai") {
+    if (code !== "lecturemate" && code !== "studyai") {
       setUnlockError("Invalid code.");
       return;
     }
@@ -1393,8 +1432,8 @@ export default function Home() {
           <div style={{ width: "260px", minWidth: "260px" }} className="flex flex-col h-full">
             {/* Sidebar header */}
             <div className="flex items-center gap-2.5 px-4 h-14 border-b shrink-0" style={{ borderColor: "var(--border)" }}>
-              <StudyAILogo size={26} />
-              <span className="text-[15px] font-semibold tracking-tight">StudyAI</span>
+              <LecturemateLogo size={26} />
+              <span className="text-[15px] font-semibold tracking-tight">Lecturemate AI</span>
               <button onClick={() => setSidebarOpen(false)} className="ml-auto opacity-50 hover:opacity-100 transition">
                 <ChevronLeft className="h-4 w-4" />
               </button>
@@ -1548,8 +1587,8 @@ export default function Home() {
                   </svg>
                 </button>
                 <button onClick={reset} className="flex items-center gap-2 hover:opacity-80 transition-opacity">
-                  <StudyAILogo size={26} />
-                  <span className="text-[15px] font-semibold tracking-tight">StudyAI</span>
+                  <LecturemateLogo size={26} />
+                  <span className="text-[15px] font-semibold tracking-tight">Lecturemate AI</span>
                   <span className="hidden sm:inline text-[11px] font-mono uppercase tracking-wider" style={{ color: "var(--muted-foreground)" }}>v1.0</span>
                 </button>
               </div>
@@ -1567,7 +1606,10 @@ export default function Home() {
                   session={session}
                   onSignOut={() => signOut()}
                   onShowGate={() => {
-                    try { localStorage.removeItem("studyai_guest_confirmed"); } catch { /* ignore */ }
+                    try {
+                      localStorage.removeItem("lecturemate_guest_confirmed");
+                      localStorage.removeItem("studyai_guest_confirmed");
+                    } catch { /* ignore */ }
                     setGateState("gate");
                   }}
                 />
@@ -1830,7 +1872,7 @@ export default function Home() {
                     <motion.div initial={{ opacity: 0, scale: 0.99 }} animate={{ opacity: 1, scale: 1 }}
                       className="aspect-video rounded-xl overflow-hidden border shadow-elegant"
                       style={{ borderColor: "var(--border)", background: "#000" }}>
-                      <div ref={iframeRef} id="studyai-yt-player" className="w-full h-full" />
+                      <div ref={iframeRef} id="lecturemate-yt-player" className="w-full h-full" />
                     </motion.div>
 
                     {/* Tab bar (full-width) */}
@@ -1972,7 +2014,7 @@ export default function Home() {
                                   }).catch(() => { /* non-critical */ });
                                 }
                               }}
-                              onUsed={() => { giveXP("useChat", { label: "Asked Owlbert" }); updateLectureProgress({ chatUsed: true }); }}
+                              onUsed={() => { giveXP("useChat", { label: "Asked Lecturemate" }); updateLectureProgress({ chatUsed: true }); }}
                             />
                           )}
                           {tab === "find" && (
@@ -2284,7 +2326,7 @@ export default function Home() {
                   <p className="text-sm mt-3" style={{ color: "var(--destructive)" }}>{unlockError}</p>
                 )}
                 <p className="text-[10px] mt-4 font-mono" style={{ color: "var(--muted-foreground)" }}>
-                  Hint (hackathon): code is <span style={{ color: "var(--foreground)" }}>studyai</span>
+                  Hint (hackathon): code is <span style={{ color: "var(--foreground)" }}>lecturemate</span>
                 </p>
               </div>
             </div>
@@ -2294,7 +2336,7 @@ export default function Home() {
 
         <footer className="border-t py-8 mt-16 shrink-0" style={{ borderColor: "var(--border)" }}>
           <div className="px-4 md:px-8 flex flex-col sm:flex-row items-center justify-between gap-2 text-xs" style={{ color: "var(--muted-foreground)" }}>
-            <p className="font-mono uppercase tracking-wider">StudyAI <span className="mx-2 opacity-40">/</span> Cloudforce Hackathon 2026</p>
+            <p className="font-mono uppercase tracking-wider">Lecturemate AI <span className="mx-2 opacity-40">/</span> Cloudforce Hackathon 2026</p>
             <p className="font-mono uppercase tracking-wider opacity-70">Powered by Claude Sonnet · Amazon Bedrock</p>
           </div>
         </footer>
@@ -2681,7 +2723,7 @@ function NextBestActionPanel({
 }) {
   const suggestion = useMemo(() => {
     if (progress.sectionsCompleted.length === 0) return { tab: "outline" as DashTab, title: "Skim the outline", desc: "Get the lay of the land in 30 seconds." };
-    if (!progress.chatUsed) return { tab: "chat" as DashTab, title: "Ask Owlbert a question", desc: "The chatbot knows this lecture cold." };
+    if (!progress.chatUsed) return { tab: "chat" as DashTab, title: "Ask Lecturemate a question", desc: "The assistant knows this lecture cold." };
     if (progress.cardsReviewed.length < 3) return { tab: "flashcards" as DashTab, title: "Review 3 flashcards", desc: "Active recall locks in the concepts." };
     if (progress.quizScore === null) return { tab: "quiz" as DashTab, title: "Take the quick quiz", desc: "A 2-minute check on what stuck." };
     if (!progress.searchUsed) return { tab: "find" as DashTab, title: "Use semantic search", desc: "Find the exact moment a concept is explained." };
@@ -4022,7 +4064,7 @@ function ChatTab({ result, materials, initialHistory, onHistoryChange, onUsed, s
         </div>
         <div className="flex-1 min-w-0">
           <div className="font-medium text-sm flex items-center gap-2">
-            Lecture Assistant
+            Lecturemate AI
             {skillLevel && (
               <span className="text-[9px] font-mono uppercase tracking-wider px-1.5 py-0.5 rounded-full"
                 style={{
@@ -4051,7 +4093,7 @@ function ChatTab({ result, materials, initialHistory, onHistoryChange, onUsed, s
               <div className="flex justify-center mb-3">
                 <Mascot className="h-20 w-20 animate-float" animated />
               </div>
-              <p className="font-serif text-xl mb-1">Hi, I&apos;m Owlbert.</p>
+              <p className="font-serif text-xl mb-1">Hi, I&apos;m Lecturemate.</p>
               <p className="text-sm" style={{ color: "var(--muted-foreground)" }}>
                 I&apos;ve read the full transcript. Ask anything and I&apos;ll explain it clearly with timestamps.
               </p>
