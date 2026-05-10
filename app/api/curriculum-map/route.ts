@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import type { TranscriptEntry, VideoMetadata } from "@/lib/youtube";
 import { extractVideoId, fetchTranscript, fetchVideoMetadata, validateYouTubeUrl } from "@/lib/youtube";
 import { generateTopicFingerprint } from "@/lib/agents/topicFingerprint";
 import { generateCurriculumMap } from "@/lib/agents/curriculumMap";
@@ -19,6 +20,24 @@ function checkRateLimit(ip: string): boolean {
   entry.count++;
   return true;
 }
+
+type LecturePrepOk = {
+  ok: true;
+  url: string;
+  videoId: string;
+  metadata: VideoMetadata;
+  transcript: TranscriptEntry[];
+};
+
+type LecturePrepErr = {
+  ok: false;
+  url: string;
+  videoId: string;
+  error: string;
+  metadata?: { title: string; channelName: string };
+};
+
+type LecturePrep = LecturePrepOk | LecturePrepErr;
 
 export async function POST(req: NextRequest) {
   const ip = req.headers.get("x-forwarded-for")?.split(",")[0] ?? req.headers.get("x-real-ip") ?? "unknown";
@@ -55,12 +74,11 @@ export async function POST(req: NextRequest) {
 
   const perVideo: { videoId: string; url: string; metadata?: { title: string; channelName: string }; error?: string }[] = [];
 
-  const fingerprintResults = await Promise.all(
-    urlStrings.map(async (url) => {
+  const prepList: LecturePrep[] = await Promise.all(
+    urlStrings.map(async (url): Promise<LecturePrep> => {
       const validation = validateYouTubeUrl(url);
       if (!validation.valid) {
-        perVideo.push({ videoId: "", url, error: validation.error });
-        return null;
+        return { ok: false, url, videoId: "", error: validation.error ?? "Invalid URL." };
       }
       const videoId = extractVideoId(url)!;
       try {
@@ -69,21 +87,46 @@ export async function POST(req: NextRequest) {
           fetchTranscript(videoId),
         ]);
         if (transcript.length === 0) {
-          perVideo.push({ videoId, url, error: "No transcript for this video." });
-          return null;
+          return {
+            ok: false,
+            url,
+            videoId,
+            error: "No transcript for this video.",
+            metadata: { title: metadata.title, channelName: metadata.channelName },
+          };
         }
-        const fp = await generateTopicFingerprint(transcript, metadata, videoId);
-        perVideo.push({ videoId, url, metadata: { title: metadata.title, channelName: metadata.channelName } });
-        return fp;
+        return { ok: true, url, videoId, metadata, transcript };
       } catch (e) {
         const msg = e instanceof Error ? e.message : "Failed to fetch lecture.";
-        perVideo.push({ videoId, url, error: msg });
-        return null;
+        return { ok: false, url, videoId, error: msg };
       }
     })
   );
 
-  const fingerprints = fingerprintResults.filter((f): f is NonNullable<typeof f> => f !== null);
+  for (const p of prepList) {
+    if (p.ok) {
+      perVideo.push({
+        videoId: p.videoId,
+        url: p.url,
+        metadata: { title: p.metadata.title, channelName: p.metadata.channelName },
+      });
+    } else {
+      perVideo.push({
+        videoId: p.videoId,
+        url: p.url,
+        metadata: p.metadata,
+        error: p.error,
+      });
+    }
+  }
+
+  const okPreps = prepList.filter((p): p is LecturePrepOk => p.ok);
+
+  const fingerprintResults = await Promise.all(
+    okPreps.map((prep) => generateTopicFingerprint(prep.transcript, prep.metadata, prep.videoId))
+  );
+
+  const fingerprints = fingerprintResults;
 
   if (fingerprints.length === 0) {
     return NextResponse.json(

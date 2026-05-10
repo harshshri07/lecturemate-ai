@@ -17,8 +17,11 @@ import type { TranscriptEntry, VideoMetadata } from "@/lib/youtube";
 import { StudyMaterials, sortFlashcardsChronologically } from "@/lib/agents/studyMaterialGenerator";
 import { SearchResult } from "@/lib/agents/semanticSearch";
 import { LectureInsights } from "@/lib/agents/insights";
-import type { FacultyAuditReport } from "@/lib/agents/facultyAudit";
-import type { CurriculumMapReport } from "@/lib/agents/curriculumMap";
+import {
+  FACULTY_DEFAULT_PUBLICATION_READY,
+  type FacultyAuditReport,
+} from "@/lib/agents/facultyAudit";
+import type { CurriculumMapReport, ObjectiveCoverageRow } from "@/lib/agents/curriculumMap";
 import { Mascot } from "@/app/components/Mascot";
 import { celebrate } from "@/app/components/Confetti";
 import { CheckInModal } from "@/app/components/CheckInModal";
@@ -2236,7 +2239,7 @@ export default function Home() {
                 <p className="text-[10px] font-mono uppercase tracking-[0.2em] mb-3" style={{ color: "var(--muted-foreground)" }}>Capability 2 · Faculty</p>
                 <h1 className="font-serif text-3xl md:text-4xl tracking-tight mb-3">Private lecture audit</h1>
                 <p className="text-sm leading-relaxed mb-8" style={{ color: "var(--muted-foreground)" }}>
-                  Voluntary, restraint-driven feedback for <em>you</em> before publishing: pedagogy, accessibility, equity, and clarity, with a prioritized fix list and timestamped rewrite ideas. Nothing here is shared with students or used for surveillance.
+                  Capability 2: voluntary private audit mapped to pedagogical reasoning, accessibility, equity and inclusion, and clarity — with a prioritized, timestamped fix list when (and only when) substantive risks appear. Uses transcript evidence processed for this audit; polishing nitpicks are omitted for experienced instructors. When majors are absent, strengths are surfaced so you still see what is already working.
                 </p>
                 <form onSubmit={(e) => { e.preventDefault(); submitFaculty(); }} className="space-y-4">
                   <div className="surface rounded-2xl p-2 shadow-elegant flex gap-2">
@@ -2316,7 +2319,7 @@ export default function Home() {
                 ))}
               </div>
               <p className="font-serif text-xl">Auditing your lecture…</p>
-              <p className="text-sm mt-2" style={{ color: "var(--muted-foreground)" }}>Private, restraint-driven, transcript-based</p>
+              <p className="text-sm mt-2" style={{ color: "var(--muted-foreground)" }}>Major flaws only • colleague-level restraint • full sampled transcript to the model</p>
               <p className="text-sm mt-4 italic max-w-lg text-center" style={{ color: "var(--muted-foreground)" }}>&ldquo;{loadingQuote}&rdquo;</p>
             </motion.main>
           )}
@@ -2333,7 +2336,7 @@ export default function Home() {
                 <p className="text-[10px] font-mono uppercase tracking-[0.2em]" style={{ color: "var(--muted-foreground)" }}>Capability 3 · Provost</p>
                 <h1 className="font-serif text-3xl md:text-4xl tracking-tight">Curriculum coverage map</h1>
                 <p className="text-sm leading-relaxed" style={{ color: "var(--muted-foreground)" }}>
-                  Paste multiple lecture URLs from one course and your stated learning objectives. The map compares what was actually taught (from transcripts) to those objectives, for leadership QA, not student surveillance.
+                  Capability 3: paste multiple URLs from one course plus the objectives as they appear in your catalog, accreditation packet, syllabus, or marketing copy. Lecturemate fingerprints transcript evidence lecture-by-lecture, compares execution to those promises at a glance, and flags where objectives look strong versus under-served or missing. Stewardship tooling for accountable leaders — not individualized student surveillance.
                 </p>
                 <div className="grid gap-4 md:grid-cols-2">
                   <div>
@@ -2397,7 +2400,9 @@ export default function Home() {
                   transition={{ duration: 2.4, repeat: Infinity, ease: "easeInOut" }} />
               </div>
               <p className="font-serif text-xl">Mapping lectures to objectives…</p>
-              <p className="text-sm mt-2" style={{ color: "var(--muted-foreground)" }}>Fingerprinting each video, then merging evidence</p>
+              <p className="text-sm mt-2 max-w-md text-center" style={{ color: "var(--muted-foreground)" }}>
+                Transcripts and rich per-lecture fingerprints run in parallel, then the curriculum map merges all evidence for leadership QA.
+              </p>
               <p className="text-sm mt-4 italic max-w-lg text-center" style={{ color: "var(--muted-foreground)" }}>&ldquo;{loadingQuote}&rdquo;</p>
             </motion.main>
           )}
@@ -2478,40 +2483,84 @@ export default function Home() {
 
 /* ─── Faculty audit report ─── */
 function FacultyAuditPanels({ report, meta }: { report: FacultyAuditReport; meta: { videoId: string; title: string; channelName: string } }) {
-  const sortedFixes = [...report.fixes].sort((a, b) => a.priority - b.priority);
+  const sortedFixes = [...(report.fixes ?? [])].sort((a, b) => a.priority - b.priority);
+  /** Major findings list is the sole signal (matches server rules; avoids stale caches). */
+  const publicationReady = sortedFixes.length === 0;
   const top3 = sortedFixes.slice(0, 3);
   const rest = sortedFixes.slice(3);
+  const pedagogyDim = report.pedagogy ?? [];
+  const accessibilityDim = report.accessibility ?? [];
+  const equityDim = report.equity ?? [];
+  const clarityDim = report.clarity ?? [];
+  const workingWell = report.workingWell ?? [];
+  const hasDimensionNotes =
+    pedagogyDim.length > 0 || accessibilityDim.length > 0 || equityDim.length > 0 || clarityDim.length > 0;
+  const displayVerdict = publicationReady
+    ? report.oneThingToFix?.trim() || FACULTY_DEFAULT_PUBLICATION_READY
+    : report.oneThingToFix;
+
   return (
     <div className="mx-auto max-w-4xl space-y-8">
       <div>
-        <p className="text-[10px] font-mono uppercase tracking-wider mb-2" style={{ color: "var(--muted-foreground)" }}>Private report · only on this device</p>
+        <p className="text-[10px] font-mono uppercase tracking-wider mb-2" style={{ color: "var(--muted-foreground)" }}>
+          Private audit for you • cached in this browser only • transcript processed server-side solely to generate this briefing • not learner surveillance
+        </p>
         <h2 className="font-serif text-2xl md:text-3xl tracking-tight mb-1">{meta.title || "Lecture"}</h2>
         <p className="text-xs" style={{ color: "var(--muted-foreground)" }}>{meta.channelName} · {meta.videoId}</p>
       </div>
+
       <div className="surface rounded-2xl p-6 border shadow-card" style={{ borderColor: "var(--border)" }}>
-        <div className="text-[10px] font-mono uppercase tracking-wider mb-2" style={{ color: "var(--primary)" }}>If you change one thing</div>
-        <p className="text-lg font-medium leading-relaxed">{report.oneThingToFix}</p>
-      </div>
-      <div className="surface rounded-2xl p-6 border shadow-card" style={{ borderColor: "var(--border)" }}>
-        <div className="flex items-center justify-between gap-3 mb-4">
-          <div>
-            <h3 className="font-serif text-xl leading-tight">Final check: top 3 changes</h3>
-            <p className="text-xs mt-1" style={{ color: "var(--muted-foreground)" }}>
-              Designed to be quick for experienced instructors. Expand for full details.
-            </p>
+        <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
+          <div className="text-[10px] font-mono uppercase tracking-wider" style={{ color: publicationReady ? "var(--success)" : "var(--primary)" }}>
+            {publicationReady ? "Publication ready" : "If you change one thing before publishing"}
           </div>
           <span className="text-[10px] font-mono uppercase tracking-wider px-2 py-1 rounded-md"
             style={{ background: "var(--surface-elevated)", color: "var(--muted-foreground)" }}>
             Private
           </span>
         </div>
-        {report.publishReady || top3.length === 0 ? (
-          <div className="rounded-xl p-4 border" style={{ borderColor: "var(--border)", background: "var(--surface)" }}>
-            <p className="text-sm" style={{ color: "var(--muted-foreground)" }}>
-              No critical changes detected. If you want, re-run after final edits for a quick double-check.
+        {!publicationReady && (
+          <p className="text-xs mb-3 leading-relaxed" style={{ color: "var(--muted-foreground)" }}>
+            Highest-impact systemic finding for an experienced instructor (Capability 2). Timestamped majors and rewrite ideas appear below only when warranted.
+          </p>
+        )}
+        <p className="text-lg font-medium leading-relaxed">{displayVerdict}</p>
+        {publicationReady && (
+          <p className="text-xs mt-4 leading-relaxed" style={{ color: "var(--muted-foreground)" }}>
+            We only escalate publication-blocking concerns from transcript evidence. Decorative polish stays off your radar on purpose.
+          </p>
+        )}
+      </div>
+
+      {publicationReady && workingWell.length > 0 && (
+        <div className="surface rounded-2xl p-6 border shadow-card" style={{ borderColor: "var(--border)" }}>
+          <h3 className="font-serif text-xl leading-tight mb-1">What is already working</h3>
+          <p className="text-xs mb-4 leading-relaxed" style={{ color: "var(--muted-foreground)" }}>
+            Balancing the rubric: strengths drawn from observable transcript cues across pedagogy, accessibility, inclusion, and clarity.
+          </p>
+          <ul className="text-sm space-y-2 list-disc pl-5" style={{ color: "var(--foreground)" }}>
+            {workingWell.map((item, i) => <li key={i}>{item}</li>)}
+          </ul>
+        </div>
+      )}
+
+      {!publicationReady && workingWell.length > 0 && (
+        <div className="surface rounded-xl p-4 border" style={{ borderColor: "var(--border)", background: "var(--surface)" }}>
+          <h4 className="text-[10px] font-mono uppercase tracking-wider mb-2" style={{ color: "var(--muted-foreground)" }}>Still working despite the gaps</h4>
+          <ul className="text-sm space-y-1.5 list-disc pl-5" style={{ color: "var(--foreground)" }}>
+            {workingWell.map((item, i) => <li key={i}>{item}</li>)}
+          </ul>
+        </div>
+      )}
+
+      {!publicationReady && (
+        <div className="surface rounded-2xl p-6 border shadow-card" style={{ borderColor: "var(--border)" }}>
+          <div className="mb-4">
+            <h3 className="font-serif text-xl leading-tight">Major findings</h3>
+            <p className="text-xs mt-1" style={{ color: "var(--muted-foreground)" }}>
+              Substantive items only — expand for rationale and suggested wording where offered.
             </p>
           </div>
-        ) : (
           <div className="space-y-3">
             {top3.map((f, i) => (
               <details key={i} className="surface rounded-xl border" style={{ borderColor: "var(--border)" }}>
@@ -2540,63 +2589,72 @@ function FacultyAuditPanels({ report, meta }: { report: FacultyAuditReport; meta
               </details>
             ))}
           </div>
-        )}
-        {rest.length > 0 && (
-          <details className="mt-5">
-            <summary className="cursor-pointer text-sm font-medium" style={{ color: "var(--foreground)" }}>
-              View {rest.length} more suggestions
-            </summary>
-            <div className="space-y-3 mt-3">
-              {rest.map((f, i) => (
-                <details key={i} className="surface rounded-xl border" style={{ borderColor: "var(--border)" }}>
-                  <summary className="cursor-pointer list-none px-4 py-3 flex items-start justify-between gap-3">
-                    <div className="min-w-0">
-                      <div className="flex flex-wrap items-center gap-2 mb-1">
-                        <span className="text-[10px] font-mono px-2 py-0.5 rounded-md"
-                          style={{ background: "var(--surface-elevated)", color: "var(--muted-foreground)" }}>P{f.priority}</span>
-                        {f.timestamp !== undefined && (
-                          <span className="text-[10px] font-mono" style={{ color: "var(--muted-foreground)" }}>@ {formatTime(f.timestamp)}</span>
-                        )}
+          {rest.length > 0 && (
+            <details className="mt-5">
+              <summary className="cursor-pointer text-sm font-medium" style={{ color: "var(--foreground)" }}>
+                View {rest.length} more major item{rest.length === 1 ? "" : "s"}
+              </summary>
+              <div className="space-y-3 mt-3">
+                {rest.map((f, i) => (
+                  <details key={i} className="surface rounded-xl border" style={{ borderColor: "var(--border)" }}>
+                    <summary className="cursor-pointer list-none px-4 py-3 flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <div className="flex flex-wrap items-center gap-2 mb-1">
+                          <span className="text-[10px] font-mono px-2 py-0.5 rounded-md"
+                            style={{ background: "var(--surface-elevated)", color: "var(--muted-foreground)" }}>P{f.priority}</span>
+                          {f.timestamp !== undefined && (
+                            <span className="text-[10px] font-mono" style={{ color: "var(--muted-foreground)" }}>@ {formatTime(f.timestamp)}</span>
+                          )}
+                        </div>
+                        <div className="font-medium">{f.title}</div>
                       </div>
-                      <div className="font-medium">{f.title}</div>
+                      <ChevronRight className="h-4 w-4 shrink-0 opacity-60" />
+                    </summary>
+                    <div className="px-4 pb-4">
+                      <p className="text-sm leading-relaxed" style={{ color: "var(--muted-foreground)" }}>{f.rationale}</p>
+                      {f.suggestedRewrite && (
+                        <div className="mt-3 text-sm rounded-lg p-3" style={{ background: "color-mix(in oklab, var(--primary) 8%, transparent)" }}>
+                          <span className="text-[10px] font-mono uppercase tracking-wider block mb-1" style={{ color: "var(--muted-foreground)" }}>Suggested rewrite</span>
+                          {f.suggestedRewrite}
+                        </div>
+                      )}
                     </div>
-                    <ChevronRight className="h-4 w-4 shrink-0 opacity-60" />
-                  </summary>
-                  <div className="px-4 pb-4">
-                    <p className="text-sm leading-relaxed" style={{ color: "var(--muted-foreground)" }}>{f.rationale}</p>
-                    {f.suggestedRewrite && (
-                      <div className="mt-3 text-sm rounded-lg p-3" style={{ background: "color-mix(in oklab, var(--primary) 8%, transparent)" }}>
-                        <span className="text-[10px] font-mono uppercase tracking-wider block mb-1" style={{ color: "var(--muted-foreground)" }}>Suggested rewrite</span>
-                        {f.suggestedRewrite}
-                      </div>
-                    )}
-                  </div>
-                </details>
-              ))}
-            </div>
+                  </details>
+                ))}
+              </div>
+            </details>
+          )}
+        </div>
+      )}
+
+      {hasDimensionNotes && (
+        <div className="grid sm:grid-cols-2 gap-4">
+          <details className="surface rounded-xl p-4 border" style={{ borderColor: "var(--border)" }} open={false}>
+            <summary className="cursor-pointer text-[10px] font-mono uppercase tracking-wider mb-3" style={{ color: "var(--muted-foreground)" }}>Pedagogy & structure</summary>
+            <ul className="text-sm space-y-2 list-disc pl-4 mt-3" style={{ color: "var(--foreground)" }}>
+              {pedagogyDim.map((t, i) => <li key={i}>{t}</li>)}
+            </ul>
           </details>
-        )}
-      </div>
-      <div className="grid md:grid-cols-3 gap-4">
-        <details className="surface rounded-xl p-4 border" style={{ borderColor: "var(--border)" }} open={false}>
-          <summary className="cursor-pointer text-[10px] font-mono uppercase tracking-wider mb-3" style={{ color: "var(--muted-foreground)" }}>Accessibility</summary>
-          <ul className="text-sm space-y-2 list-disc pl-4 mt-3" style={{ color: "var(--foreground)" }}>
-            {report.accessibility.map((t, i) => <li key={i}>{t}</li>)}
-          </ul>
-        </details>
-        <details className="surface rounded-xl p-4 border" style={{ borderColor: "var(--border)" }} open={false}>
-          <summary className="cursor-pointer text-[10px] font-mono uppercase tracking-wider mb-3" style={{ color: "var(--muted-foreground)" }}>Equity & inclusion</summary>
-          <ul className="text-sm space-y-2 list-disc pl-4 mt-3" style={{ color: "var(--foreground)" }}>
-            {report.equity.map((t, i) => <li key={i}>{t}</li>)}
-          </ul>
-        </details>
-        <details className="surface rounded-xl p-4 border" style={{ borderColor: "var(--border)" }} open={false}>
-          <summary className="cursor-pointer text-[10px] font-mono uppercase tracking-wider mb-3" style={{ color: "var(--muted-foreground)" }}>Clarity</summary>
-          <ul className="text-sm space-y-2 list-disc pl-4 mt-3" style={{ color: "var(--foreground)" }}>
-            {report.clarity.map((t, i) => <li key={i}>{t}</li>)}
-          </ul>
-        </details>
-      </div>
+          <details className="surface rounded-xl p-4 border" style={{ borderColor: "var(--border)" }} open={false}>
+            <summary className="cursor-pointer text-[10px] font-mono uppercase tracking-wider mb-3" style={{ color: "var(--muted-foreground)" }}>Accessibility</summary>
+            <ul className="text-sm space-y-2 list-disc pl-4 mt-3" style={{ color: "var(--foreground)" }}>
+              {accessibilityDim.map((t, i) => <li key={i}>{t}</li>)}
+            </ul>
+          </details>
+          <details className="surface rounded-xl p-4 border" style={{ borderColor: "var(--border)" }} open={false}>
+            <summary className="cursor-pointer text-[10px] font-mono uppercase tracking-wider mb-3" style={{ color: "var(--muted-foreground)" }}>Equity & inclusion</summary>
+            <ul className="text-sm space-y-2 list-disc pl-4 mt-3" style={{ color: "var(--foreground)" }}>
+              {equityDim.map((t, i) => <li key={i}>{t}</li>)}
+            </ul>
+          </details>
+          <details className="surface rounded-xl p-4 border" style={{ borderColor: "var(--border)" }} open={false}>
+            <summary className="cursor-pointer text-[10px] font-mono uppercase tracking-wider mb-3" style={{ color: "var(--muted-foreground)" }}>Clarity</summary>
+            <ul className="text-sm space-y-2 list-disc pl-4 mt-3" style={{ color: "var(--foreground)" }}>
+              {clarityDim.map((t, i) => <li key={i}>{t}</li>)}
+            </ul>
+          </details>
+        </div>
+      )}
     </div>
   );
 }
@@ -2614,26 +2672,96 @@ function ProvostCurriculumPanels({
     Low: "color-mix(in oklab, var(--muted-foreground) 80%, transparent)",
     Missing: "var(--destructive)",
   };
+
+  const rows = report.objectiveCoverage;
+  const tally = rows.reduce(
+    (acc, r) => {
+      acc[r.coverageLevel] += 1;
+      return acc;
+    },
+    { High: 0, Medium: 0, Low: 0, Missing: 0 } as Record<ObjectiveCoverageRow["coverageLevel"], number>,
+  );
+
+  const underServed = rows.filter((r) => r.coverageLevel === "Low" || r.coverageLevel === "Missing");
+  const stronglyCovered = rows.filter((r) => r.coverageLevel === "High");
+
   return (
     <div className="mx-auto max-w-5xl space-y-10">
       <div>
-        <h2 className="font-serif text-2xl md:text-3xl tracking-tight mb-2">Curriculum map</h2>
+        <p className="text-[10px] font-mono uppercase tracking-wider mb-2" style={{ color: "var(--muted-foreground)" }}>
+          Leadership QA briefing • Capability 3 • cached in this browser • evidence from transcripts, not syllabi-only intent
+        </p>
+        <h2 className="font-serif text-2xl md:text-3xl tracking-tight mb-2">Curriculum coverage map</h2>
         <p className="text-sm leading-relaxed max-w-3xl" style={{ color: "var(--muted-foreground)" }}>{report.overallNotes}</p>
       </div>
+
+      <section className="surface rounded-2xl p-5 border shadow-card space-y-4" style={{ borderColor: "var(--border)" }}>
+        <h3 className="font-serif text-lg leading-tight">At a glance: objectives versus what lectures showed</h3>
+        <p className="text-xs leading-relaxed" style={{ color: "var(--muted-foreground)" }}>
+          High signals multiple transcript touchpoints aligning with an objective; Medium is partial; Low is thin exposure; Missing is no usable fingerprint linkage to the objective text you supplied.
+        </p>
+        <div className="flex flex-wrap gap-2">
+          {[
+            { label: "Strong coverage", n: tally.High, color: covColor.High },
+            { label: "Partial", n: tally.Medium, color: covColor.Medium },
+            { label: "Thin exposure", n: tally.Low, color: covColor.Low },
+            { label: "Missing", n: tally.Missing, color: covColor.Missing },
+          ].map(({ label, n, color }) => (
+            <span
+              key={label}
+              className="inline-flex items-baseline gap-2 rounded-lg border px-3 py-2 text-xs"
+              style={{ borderColor: "var(--border)", background: "var(--surface-elevated)" }}
+            >
+              <span style={{ fontWeight: 600, color }}>{n}</span>
+              <span style={{ color: "var(--muted-foreground)" }}>{label}</span>
+            </span>
+          ))}
+        </div>
+
+        {(underServed.length > 0 || stronglyCovered.length > 0) && (
+          <div className="grid md:grid-cols-2 gap-4 pt-2">
+            {underServed.length > 0 && (
+              <div className="rounded-xl border p-4" style={{ borderColor: "color-mix(in oklab, var(--destructive) 25%, transparent)" }}>
+                <h4 className="text-[10px] font-mono uppercase tracking-wider mb-2" style={{ color: "var(--destructive)" }}>Under-served or absent</h4>
+                <ul className="text-sm space-y-2 list-disc pl-4" style={{ color: "var(--foreground)" }}>
+                  {underServed.map((r, i) => (
+                    <li key={i}>
+                      <span className="font-mono text-[10px] mr-2" style={{ color: covColor[r.coverageLevel] }}>[{r.coverageLevel}]</span>
+                      {r.objective}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+            {stronglyCovered.length > 0 && (
+              <div className="rounded-xl border p-4" style={{ borderColor: "color-mix(in oklab, var(--success) 30%, transparent)" }}>
+                <h4 className="text-[10px] font-mono uppercase tracking-wider mb-2" style={{ color: "var(--success)" }}>Well supported in lecture evidence</h4>
+                <ul className="text-sm space-y-2 list-disc pl-4" style={{ color: "var(--foreground)" }}>
+                  {stronglyCovered.map((r, i) => (
+                    <li key={i}>{r.objective}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
+          </div>
+        )}
+      </section>
+
       {perVideo && perVideo.some((p) => p.error) && (
         <div className="surface rounded-xl p-4 border" style={{ borderColor: "var(--border)" }}>
           <h4 className="text-[10px] font-mono uppercase tracking-wider mb-2" style={{ color: "var(--warning)" }}>Lecture ingest notes</h4>
           <ul className="text-xs space-y-1 font-mono" style={{ color: "var(--muted-foreground)" }}>
             {perVideo.map((p, i) => (
-              <li key={i}>{p.metadata?.title ?? p.url}{p.error ? ` [${p.error}]` : " [OK]"}</li>
+              <li key={i}>{p.metadata?.title ?? p.url}{p.error ? ` — ${p.error}` : " — OK"}</li>
             ))}
           </ul>
         </div>
       )}
+
       <div>
-        <h3 className="font-serif text-xl mb-4">Objectives vs lectures</h3>
+        <h3 className="font-serif text-xl mb-4">Detailed objective coverage</h3>
         <div className="space-y-4">
-          {report.objectiveCoverage.map((row, i) => (
+          {rows.map((row, i) => (
             <div key={i} className="surface rounded-xl p-5 border" style={{ borderColor: "var(--border)" }}>
               <div className="flex flex-wrap items-start justify-between gap-2 mb-3">
                 <p className="font-medium flex-1 min-w-0">{row.objective}</p>
@@ -2651,21 +2779,24 @@ function ProvostCurriculumPanels({
                   ))}
                 </ul>
               ) : (
-                <p className="text-xs" style={{ color: "var(--muted-foreground)" }}>No transcript-backed evidence in fingerprints for this objective.</p>
+                <p className="text-xs" style={{ color: "var(--muted-foreground)" }}>No transcript-backed evidence surfaced in fingerprints for this objective.</p>
               )}
             </div>
           ))}
         </div>
       </div>
+
       <div className="grid md:grid-cols-2 gap-4">
         <div className="surface rounded-xl p-4 border" style={{ borderColor: "var(--border)" }}>
-          <h4 className="font-serif text-lg mb-2">Gaps</h4>
+          <h4 className="font-serif text-lg mb-2">Stewardship gaps</h4>
+          <p className="text-[10px] font-mono uppercase tracking-wider mb-3" style={{ color: "var(--muted-foreground)" }}>Risks to catalog promises or accreditation language</p>
           <ul className="text-sm list-disc pl-4 space-y-1" style={{ color: "var(--muted-foreground)" }}>
             {report.gaps.map((g, i) => <li key={i}>{g}</li>)}
           </ul>
         </div>
         <div className="surface rounded-xl p-4 border" style={{ borderColor: "var(--border)" }}>
           <h4 className="font-serif text-lg mb-2">Redundancies</h4>
+          <p className="text-[10px] font-mono uppercase tracking-wider mb-3" style={{ color: "var(--muted-foreground)" }}>Potential overlap hiding schedule for missing depth</p>
           <ul className="text-sm list-disc pl-4 space-y-1" style={{ color: "var(--muted-foreground)" }}>
             {report.redundancies.map((g, i) => <li key={i}>{g}</li>)}
           </ul>
