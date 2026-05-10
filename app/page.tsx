@@ -1727,10 +1727,15 @@ export default function Home() {
           {/* ══ PROCESSING (Student) ══ */}
           {appMode === "student" && (isProcessing || stage === "error") && !result && (
             <motion.main key="processing" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
-              className="flex-1 flex items-center justify-center px-4 py-16">
-              <div className="absolute inset-0 -z-10 overflow-hidden pointer-events-none">
-                <div className="absolute top-1/3 left-1/2 -translate-x-1/2 h-[500px] w-[500px] rounded-full blur-[140px] animate-pulse-soft" style={{ background: "color-mix(in oklab, var(--primary) 8%, transparent)" }} />
-              </div>
+              className="flex-1 flex items-center justify-center px-4 py-16 relative">
+              {stage !== "error" && (
+                <div className="absolute inset-0 -z-10 overflow-hidden pointer-events-none">
+                  <div
+                    className="absolute top-1/3 left-1/2 -translate-x-1/2 h-[500px] w-[500px] rounded-full blur-[140px] animate-pulse-soft"
+                    style={{ background: "color-mix(in oklab, var(--primary) 8%, transparent)" }}
+                  />
+                </div>
+              )}
 
               {stage === "error" ? (
                 <div className="max-w-sm text-center">
