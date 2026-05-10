@@ -6,6 +6,7 @@ import { StudyMaterials } from "@/lib/agents/studyMaterialGenerator";
 
 interface SummariesProps {
   materials: StudyMaterials;
+  skillLevel?: "beginner" | "intermediate" | "advanced";
 }
 
 type Tab = "short" | "medium" | "full";
@@ -16,8 +17,14 @@ const TABS: { id: Tab; label: string; icon: string; description: string }[] = [
   { id: "full", label: "Deep Dive", icon: "🔬", description: "Complete analysis" },
 ];
 
-export default function Summaries({ materials }: SummariesProps) {
-  const [activeTab, setActiveTab] = useState<Tab>("short");
+const LEVEL_DEFAULT_TAB: Record<string, Tab> = {
+  beginner: "short",
+  intermediate: "medium",
+  advanced: "full",
+};
+
+export default function Summaries({ materials, skillLevel = "intermediate" }: SummariesProps) {
+  const [activeTab, setActiveTab] = useState<Tab>(() => LEVEL_DEFAULT_TAB[skillLevel] ?? "medium");
 
   return (
     <div>
@@ -83,17 +90,20 @@ export default function Summaries({ materials }: SummariesProps) {
         <div className="mt-4">
           <p className="text-sm font-semibold text-gray-700 dark:text-gray-300 mb-2">Key Concepts</p>
           <div className="flex flex-wrap gap-2">
-            {materials.concepts.map((concept, i) => (
-              <motion.span
-                key={i}
-                initial={{ opacity: 0, scale: 0.8 }}
-                animate={{ opacity: 1, scale: 1 }}
-                transition={{ delay: i * 0.04 }}
-                className="px-3 py-1 bg-indigo-50 dark:bg-indigo-900/30 text-indigo-700 dark:text-indigo-300 rounded-full text-xs font-medium border border-indigo-100 dark:border-indigo-800"
-              >
-                {concept}
-              </motion.span>
-            ))}
+            {/* beginners see up to 5 concepts, intermediates up to 10, advanced see all */}
+            {materials.concepts
+              .slice(0, skillLevel === "beginner" ? 5 : skillLevel === "advanced" ? undefined : 10)
+              .map((concept, i) => (
+                <motion.span
+                  key={i}
+                  initial={{ opacity: 0, scale: 0.8 }}
+                  animate={{ opacity: 1, scale: 1 }}
+                  transition={{ delay: i * 0.04 }}
+                  className="px-3 py-1 bg-indigo-50 dark:bg-indigo-900/30 text-indigo-700 dark:text-indigo-300 rounded-full text-xs font-medium border border-indigo-100 dark:border-indigo-800"
+                >
+                  {concept}
+                </motion.span>
+              ))}
           </div>
         </div>
       )}

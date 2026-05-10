@@ -8,6 +8,7 @@ import { Flashcard } from "@/lib/agents/studyMaterialGenerator";
 interface FlashcardsProps {
   flashcards: Flashcard[];
   onSeek: (timestamp: number) => void;
+  skillLevel?: "beginner" | "intermediate" | "advanced";
 }
 
 function formatTime(seconds: number): string {
@@ -16,12 +17,33 @@ function formatTime(seconds: number): string {
   return `${m}:${String(s).padStart(2, "0")}`;
 }
 
-export default function Flashcards({ flashcards, onSeek }: FlashcardsProps) {
+/**
+ * Reorder flashcards based on skill level.
+ *
+ * Beginner   → definition-style cards first (shorter answers → definitional)
+ * Intermediate → original order preserved
+ * Advanced   → application/synthesis cards first (longer, later-section cards)
+ */
+function orderByLevel(cards: Flashcard[], skillLevel: "beginner" | "intermediate" | "advanced"): Flashcard[] {
+  if (skillLevel === "intermediate") return cards;
+  const sorted = [...cards];
+  if (skillLevel === "beginner") {
+    // Shorter answers tend to be definitional; put them first
+    sorted.sort((a, b) => a.answer.length - b.answer.length);
+  } else {
+    // Advanced: longer answers + higher timestamps first (later sections = synthesis)
+    sorted.sort((a, b) => b.timestamp - a.timestamp || b.answer.length - a.answer.length);
+  }
+  return sorted;
+}
+
+export default function Flashcards({ flashcards, onSeek, skillLevel = "intermediate" }: FlashcardsProps) {
+  const orderedCards = orderByLevel(flashcards, skillLevel);
   const [current, setCurrent] = useState(0);
   const [flipped, setFlipped] = useState(false);
   const [direction, setDirection] = useState(0);
 
-  if (flashcards.length === 0) {
+  if (orderedCards.length === 0) {
     return (
       <div className="text-center py-12 text-gray-400 dark:text-gray-500">
         <p className="text-4xl mb-2">🃏</p>
@@ -30,7 +52,7 @@ export default function Flashcards({ flashcards, onSeek }: FlashcardsProps) {
     );
   }
 
-  const card = flashcards[current];
+  const card = orderedCards[current];
 
   const goTo = (next: number) => {
     setDirection(next > current ? 1 : -1);
@@ -39,20 +61,20 @@ export default function Flashcards({ flashcards, onSeek }: FlashcardsProps) {
   };
 
   const prev = () => current > 0 && goTo(current - 1);
-  const next = () => current < flashcards.length - 1 && goTo(current + 1);
+  const next = () => current < orderedCards.length - 1 && goTo(current + 1);
 
   return (
     <div>
       <h2 className="text-lg font-bold text-gray-900 dark:text-white mb-4 flex items-center gap-2">
         <span className="text-xl">🃏</span> Flashcards
-        <span className="ml-auto text-sm font-normal text-gray-400">{current + 1} / {flashcards.length}</span>
+        <span className="ml-auto text-sm font-normal text-gray-400">{current + 1} / {orderedCards.length}</span>
       </h2>
 
       {/* Progress bar */}
       <div className="w-full bg-gray-100 dark:bg-gray-800 rounded-full h-1.5 mb-5">
         <motion.div
           className="bg-indigo-500 h-1.5 rounded-full"
-          animate={{ width: `${((current + 1) / flashcards.length) * 100}%` }}
+          animate={{ width: `${((current + 1) / orderedCards.length) * 100}%` }}
           transition={{ duration: 0.3 }}
         />
       </div>
@@ -136,7 +158,7 @@ export default function Flashcards({ flashcards, onSeek }: FlashcardsProps) {
         </button>
 
         <div className="flex gap-1">
-          {flashcards.map((_, i) => (
+          {orderedCards.map((_, i) => (
             <button
               key={i}
               onClick={() => goTo(i)}
@@ -149,7 +171,7 @@ export default function Flashcards({ flashcards, onSeek }: FlashcardsProps) {
 
         <button
           onClick={next}
-          disabled={current === flashcards.length - 1}
+          disabled={current === orderedCards.length - 1}
           className="flex items-center gap-1 px-4 py-2 rounded-xl bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-300 disabled:opacity-30 hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors font-medium text-sm"
         >
           Next <ChevronRight className="w-4 h-4" />
