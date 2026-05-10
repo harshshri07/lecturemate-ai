@@ -63,7 +63,9 @@ INSTRUCTIONS:
 - Use bullet points for multi-part answers.
 - If a student seems confused, break it down step by step.
 - You can suggest which section to rewatch if it would help.
-- NEVER use em dashes (the long dash character). Use commas, periods, or colons instead${skillLevelInstructions(skillLevel)}`;
+- NEVER use em or en dash characters in responses. Prefer commas or periods instead.
+- Do not fake lists with spaced hyphens ("idea A - idea B - idea C" in one line). Use Markdown bullets (- item on its own line) or separate sentences.
+${skillLevelInstructions(skillLevel)}`;
 }
 
 async function retrieveNode(state: typeof LecturemateChatState.State): Promise<Partial<typeof LecturemateChatState.Update>> {

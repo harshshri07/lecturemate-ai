@@ -3,12 +3,11 @@
 import { useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { ChevronLeft, ChevronRight, Clock, RotateCcw } from "lucide-react";
-import { Flashcard } from "@/lib/agents/studyMaterialGenerator";
+import { Flashcard, sortFlashcardsChronologically } from "@/lib/agents/studyMaterialGenerator";
 
 interface FlashcardsProps {
   flashcards: Flashcard[];
   onSeek: (timestamp: number) => void;
-  skillLevel?: "beginner" | "intermediate" | "advanced";
 }
 
 function formatTime(seconds: number): string {
@@ -17,28 +16,10 @@ function formatTime(seconds: number): string {
   return `${m}:${String(s).padStart(2, "0")}`;
 }
 
-/**
- * Reorder flashcards based on skill level.
- *
- * Beginner   → definition-style cards first (shorter answers → definitional)
- * Intermediate → original order preserved
- * Advanced   → application/synthesis cards first (longer, later-section cards)
- */
-function orderByLevel(cards: Flashcard[], skillLevel: "beginner" | "intermediate" | "advanced"): Flashcard[] {
-  if (skillLevel === "intermediate") return cards;
-  const sorted = [...cards];
-  if (skillLevel === "beginner") {
-    // Shorter answers tend to be definitional; put them first
-    sorted.sort((a, b) => a.answer.length - b.answer.length);
-  } else {
-    // Advanced: longer answers + higher timestamps first (later sections = synthesis)
-    sorted.sort((a, b) => b.timestamp - a.timestamp || b.answer.length - a.answer.length);
-  }
-  return sorted;
-}
+/** Deck order follows the lecture timeline (matches video seek timestamps). */
 
-export default function Flashcards({ flashcards, onSeek, skillLevel = "intermediate" }: FlashcardsProps) {
-  const orderedCards = orderByLevel(flashcards, skillLevel);
+export default function Flashcards({ flashcards, onSeek }: FlashcardsProps) {
+  const orderedCards = sortFlashcardsChronologically(flashcards);
   const [current, setCurrent] = useState(0);
   const [flipped, setFlipped] = useState(false);
   const [direction, setDirection] = useState(0);

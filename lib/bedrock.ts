@@ -9,8 +9,8 @@ const client = new BedrockRuntimeClient({
 });
 
 // Model lineup: picked per task for the best speed/cost/quality tradeoff
-export const MODEL_SONNET     = "us.anthropic.claude-sonnet-4-6";                  // quality-sensitive summaries
-export const MODEL_HAIKU      = "us.anthropic.claude-haiku-4-5-20251001-v1:0";     // structured JSON (outline, cards, insights)
+export const MODEL_SONNET     = "us.anthropic.claude-sonnet-4-6";                  // summaries, chat streaming
+export const MODEL_HAIKU      = "us.anthropic.claude-haiku-4-5-20251001-v1:0";     // outline, flashcards, insights JSON
 export const MODEL_NOVA_MICRO = "us.amazon.nova-micro-v1:0";                       // ultrafast retrieval (search)
 export const MODEL_NOVA_PRO   = "us.amazon.nova-pro-v1:0";                         // multilingual
 

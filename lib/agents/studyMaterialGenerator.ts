@@ -18,7 +18,19 @@ export interface StudyMaterials {
   concepts: string[];
 }
 
-const SYSTEM_PROMPT = `You are a study coach. Given structured lecture sections, generate flashcards, multi-depth summaries, and key concepts, always citing the source timestamp. Return ONLY valid JSON with no markdown, no code fences, no extra explanation. IMPORTANT: Never use em dashes (the long dash character) in any text. Use commas, periods, or colons instead.`;
+/** Stable lecture order for flashcards: earlier timestamps first (ties broken by section, then question). */
+export function sortFlashcardsChronologically(flashcards: Flashcard[]): Flashcard[] {
+  return [...flashcards].sort((a, b) => {
+    const ta = typeof a.timestamp === "number" && !Number.isNaN(a.timestamp) ? a.timestamp : 0;
+    const tb = typeof b.timestamp === "number" && !Number.isNaN(b.timestamp) ? b.timestamp : 0;
+    if (ta !== tb) return ta - tb;
+    const sb = `${a.sectionTitle ?? ""}|${a.question}`;
+    const sc = `${b.sectionTitle ?? ""}|${b.question}`;
+    return sb.localeCompare(sc);
+  });
+}
+
+const SYSTEM_PROMPT = `You are a study coach. Given structured lecture sections, generate flashcards, multi-depth summaries, and key concepts, always citing the source timestamp. Return ONLY valid JSON with no markdown, no code fences, no extra explanation. Never use em dash or en dash characters in prose. Do not enumerate with spaced hyphen chains ("concept A - concept B - concept C") in one paragraph; use commas or semicolons, separate paragraphs inside the JSON string, or bullets that start each line with hyphen-plus-space. ASCII hyphens in compound words remain fine.`;
 
 export async function generateStudyMaterials(
   lecture: StructuredLecture
@@ -69,7 +81,8 @@ Requirements:
 - Make sure each flashcard answer is distinct from other answers (no two answers should be too similar).
 - Timestamp for each flashcard must be the startTime of its section (integer seconds)
 - List 10-15 key concepts as short strings
-- All summaries must be substantive and accurate`;
+- All summaries must be substantive and accurate
+- In summary strings especially "medium": avoid long runs of inline " - " between topics; use paragraph breaks or line-leading Markdown bullets (- ) where lists aid scanning; keep some sections as prose when that reads better.`;
 
   const raw = await invokeAgent(SYSTEM_PROMPT, userMessage);
 
@@ -84,7 +97,7 @@ Requirements:
         medium: parsed.summaries?.medium ?? "Summary not available.",
         full: parsed.summaries?.full ?? "Summary not available.",
       },
-      flashcards: Array.isArray(parsed.flashcards) ? parsed.flashcards : [],
+      flashcards: sortFlashcardsChronologically(Array.isArray(parsed.flashcards) ? parsed.flashcards : []),
       concepts: Array.isArray(parsed.concepts) ? parsed.concepts : [],
     };
   } catch {
@@ -94,12 +107,14 @@ Requirements:
         medium: lecture.sections.map((s) => `**${s.title}**: ${s.summary}`).join("\n\n"),
         full: lecture.sections.map((s) => `## ${s.title}\n${s.summary}`).join("\n\n"),
       },
-      flashcards: lecture.sections.slice(0, 5).map((s, i) => ({
-        question: `What does "${s.title}" cover in this lecture?`,
-        answer: s.summary,
-        timestamp: s.startTime,
-        sectionTitle: s.title,
-      })),
+      flashcards: sortFlashcardsChronologically(
+        lecture.sections.slice(0, 5).map((s) => ({
+          question: `What does "${s.title}" cover in this lecture?`,
+          answer: s.summary,
+          timestamp: s.startTime,
+          sectionTitle: s.title,
+        }))
+      ),
       concepts: lecture.sections.map((s) => s.title),
     };
   }

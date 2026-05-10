@@ -63,6 +63,7 @@ Rules:
 - 3-5 prerequisites (short phrases, ≤6 words each).
 - 3-5 nextSteps (short phrases, ≤6 words each).
 - Exactly 3 keyTakeaways (clear, complete sentences).
+- estimatedStudyMinutes: extra focused practice time AFTER watching (notes, flashcards, exercises), typical for many learners—not how long passive viewing takes, and NEVER set equal to the full video/runtime length rounded up. Faster students need less; new topics need more. Pick a sane mid-range tied to conceptual density (often ~25–60% of video minutes for beginner talks, capped well below runtime for long lectures).
 - Return ONLY the JSON.`;
 
   const raw = await invokeAgent(SYSTEM_PROMPT, userMessage, 1600, MODEL_HAIKU);
@@ -71,6 +72,15 @@ Rules:
     const m = raw.match(/\{[\s\S]*\}/);
     if (!m) throw new Error("No JSON in response");
     const p = JSON.parse(m[0]) as Partial<LectureInsights>;
+
+    const videoMinutes = Math.max(1, Math.ceil(totalDuration / 60));
+    const capExtraStudy = Math.min(120, Math.max(20, Math.round(videoMinutes * 0.55)));
+    const modelEst = Number(p.estimatedStudyMinutes);
+    const fallbackEst = Math.round(videoMinutes * 0.42);
+    const estimatedStudyMinutes = Math.max(
+      12,
+      Math.min(capExtraStudy, Number.isFinite(modelEst) && modelEst > 0 ? modelEst : fallbackEst),
+    );
 
     // Sanitize
     const concepts: ConceptNode[] = Array.isArray(p.concepts)
@@ -96,7 +106,7 @@ Rules:
       difficulty: ["beginner", "intermediate", "advanced"].includes(p.difficulty ?? "")
         ? (p.difficulty as LectureInsights["difficulty"])
         : "intermediate",
-      estimatedStudyMinutes: Math.max(5, Math.min(180, Number(p.estimatedStudyMinutes) || 30)),
+      estimatedStudyMinutes,
       concepts,
       difficultyTimeline,
       prerequisites: Array.isArray(p.prerequisites) ? p.prerequisites.slice(0, 5).map(String) : [],
@@ -104,9 +114,10 @@ Rules:
       keyTakeaways: Array.isArray(p.keyTakeaways) ? p.keyTakeaways.slice(0, 3).map(String) : [],
     };
   } catch {
+    const videoMinutes = Math.max(1, Math.ceil(totalDuration / 60));
     return {
       difficulty: "intermediate",
-      estimatedStudyMinutes: 30,
+      estimatedStudyMinutes: Math.min(90, Math.max(15, Math.round(videoMinutes * 0.4))),
       concepts: [],
       difficultyTimeline: [],
       prerequisites: [],

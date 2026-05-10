@@ -13,7 +13,8 @@ import { useSession } from "next-auth/react";
 import { signOut } from "next-auth/react";
 import Image from "next/image";
 import { StructuredLecture } from "@/lib/agents/structurer";
-import { StudyMaterials } from "@/lib/agents/studyMaterialGenerator";
+import type { TranscriptEntry, VideoMetadata } from "@/lib/youtube";
+import { StudyMaterials, sortFlashcardsChronologically } from "@/lib/agents/studyMaterialGenerator";
 import { SearchResult } from "@/lib/agents/semanticSearch";
 import { LectureInsights } from "@/lib/agents/insights";
 import type { FacultyAuditReport } from "@/lib/agents/facultyAudit";
@@ -40,7 +41,7 @@ import {
 
 interface ProcessResult {
   videoId: string;
-  metadata: { title: string; channelName: string; thumbnailUrl: string };
+  metadata: VideoMetadata;
   lecture: StructuredLecture;
   studyMaterials: StudyMaterials;
   insights?: LectureInsights;
@@ -81,17 +82,6 @@ function formatTime(sec: number) {
   const s = Math.floor(sec % 60);
   if (h > 0) return `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
   return `${m}:${String(s).padStart(2, "0")}`;
-}
-
-/** Renders **bold** inline markdown, used in summary paragraphs */
-function renderMarkdown(text: string) {
-  const sanitized = text.replace(/\u2014/g, ",").replace(/\u2013/g, "-");
-  const parts = sanitized.split(/(\*\*[^*]+\*\*)/g);
-  return parts.map((chunk, i) =>
-    chunk.startsWith("**") && chunk.endsWith("**")
-      ? <strong key={i} style={{ color: "var(--foreground)", fontWeight: 600 }}>{chunk.slice(2, -2)}</strong>
-      : chunk
-  );
 }
 
 /** Renders inline markdown: ***bi***, **bold**, *italic*, `code` */
@@ -219,11 +209,12 @@ function uniq(nums: number[]) {
   return Array.from(new Set(nums)).sort((a, b) => a - b);
 }
 
-/** Seconds of active playback required in a section before it counts as "watched" for chapter XP. */
+/** Active playback needed in a section before it counts as "explored" for XP (capped so long chapters are still reachable). */
 function sectionWatchThresholdSec(sections: { startTime: number; endTime: number }[], i: number): number {
   const s = sections[i];
   const len = Math.max(1, s.endTime - s.startTime);
-  return Math.min(len * 0.9, Math.max(12, len * 0.32));
+  const target = Math.max(15, Math.min(150, len * 0.22));
+  return target;
 }
 
 function loadProgress(videoId: string): LectureProgress {
@@ -362,6 +353,35 @@ function saveLecture(entry: SavedLecture) {
   const all = pruneExpired(loadSavedLectures()).filter((l) => l.id !== entry.id);
   const updated = pruneExpired([entry, ...all]).slice(0, MAX_SAVED);
   try { localStorage.setItem(STORAGE_KEY, JSON.stringify(updated)); } catch { /* storage full */ }
+}
+
+/** Merge AI insights into a saved lecture (localStorage + optional cloud upsert). */
+function mergeInsightsIntoSavedLecture(videoId: string, insights: LectureInsights, syncCloud: boolean) {
+  const all = loadSavedLectures();
+  const idx = all.findIndex((l) => l.id === videoId);
+  if (idx < 0) return;
+  const row = all[idx];
+  const next: SavedLecture = {
+    ...row,
+    savedAt: Date.now(),
+    result: { ...row.result, insights },
+  };
+  saveLecture(next);
+  if (syncCloud) {
+    fetch("/api/saved-lectures", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        id:             next.id,
+        title:          next.title,
+        channelName:    next.channelName,
+        thumbnailUrl:   next.thumbnailUrl,
+        result:         next.result,
+        studyMaterials: next.studyMaterials,
+        chatHistory:    next.chatHistory ?? [],
+      }),
+    }).catch(() => { /* non-critical */ });
+  }
 }
 
 function updateChatHistory(videoId: string, history: ChatMessage[]) {
@@ -573,6 +593,11 @@ export default function Home() {
   const sectionWatchAccumRef = useRef<Record<number, number>>({});
   const resultRef = useRef<ProcessResult | null>(null);
   const lectureProgressRef = useRef<LectureProgress>(DEFAULT_PROGRESS);
+  /** Transcript from `/api/process-url` only; used once to avoid re-fetching YouTube for insights. */
+  const insightsTranscriptRef = useRef<TranscriptEntry[] | null>(null);
+  const [insightsLoading, setInsightsLoading] = useState(false);
+  const [insightsError, setInsightsError] = useState<string | null>(null);
+  const [insightsRetryKey, setInsightsRetryKey] = useState(0);
 
   useEffect(() => {
     if (!result?.videoId) return;
@@ -608,6 +633,62 @@ export default function Home() {
   useEffect(() => {
     lectureProgressRef.current = lectureProgress;
   }, [lectureProgress]);
+
+  /** Load lecture insights after the main pipeline returns (parallel path was removed for faster first paint). */
+  useEffect(() => {
+    const vid = result?.videoId;
+    if (!vid || result?.insights) {
+      setInsightsLoading(false);
+      return;
+    }
+
+    setInsightsLoading(true);
+    setInsightsError(null);
+
+    const ac = new AbortController();
+
+    void (async () => {
+      const meta = result.metadata;
+      const body =
+        insightsTranscriptRef.current && insightsTranscriptRef.current.length > 0
+          ? {
+              transcript: insightsTranscriptRef.current,
+              metadata: { ...meta, videoId: meta.videoId ?? vid },
+            }
+          : {
+              videoId: vid,
+              metadata: { ...meta, videoId: meta.videoId ?? vid },
+            };
+
+      try {
+        const res = await fetch("/api/lecture-insights", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+          signal: ac.signal,
+        });
+        const payload = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          throw new Error(typeof payload.error === "string" ? payload.error : "Insights request failed.");
+        }
+        const insights = payload.insights as LectureInsights | undefined;
+        if (!insights) throw new Error("Invalid insights response.");
+
+        insightsTranscriptRef.current = null;
+
+        setResult((prev) => (prev && prev.videoId === vid ? { ...prev, insights } : prev));
+        mergeInsightsIntoSavedLecture(vid, insights, isSignedIn);
+        setSavedLectures(loadSavedLectures());
+      } catch (e) {
+        if (e instanceof Error && e.name === "AbortError") return;
+        setInsightsError(e instanceof Error ? e.message : "Insights failed.");
+      } finally {
+        if (!ac.signal.aborted) setInsightsLoading(false);
+      }
+    })();
+
+    return () => ac.abort();
+  }, [result, isSignedIn, insightsRetryKey]);
 
   const updateLectureProgress = useCallback((patch: Partial<LectureProgress> | ((prev: LectureProgress) => LectureProgress)) => {
     if (!result?.videoId) return;
@@ -661,6 +742,9 @@ export default function Home() {
   }, [updateLectureProgress, giveXP]);
 
   const applyRestoredLecture = useCallback((lec: SavedLecture, tabOverride?: DashTab) => {
+    insightsTranscriptRef.current = null;
+    setInsightsError(null);
+    setInsightsRetryKey(0);
     setResult(lec.result);
     setStudyMaterials(lec.studyMaterials);
     setChatHistory(lec.chatHistory ?? []);
@@ -1014,26 +1098,16 @@ export default function Home() {
 
                   if (activelyWatching && elapsedSec > 0) {
                     sectionWatchAccumRef.current[idx] = (sectionWatchAccumRef.current[idx] ?? 0) + elapsedSec;
+                    const thrHere = sectionWatchThresholdSec(sections, idx);
+                    if ((sectionWatchAccumRef.current[idx] ?? 0) >= thrHere) {
+                      markChapterVisitedRef.current(idx);
+                    }
                   }
 
                   const prevSec = ytLastSectionRef.current;
                   if (prevSec !== idx) {
                     setActiveSection(idx);
-                    if (prevSec >= 0 && idx === prevSec + 1) {
-                      const thr = sectionWatchThresholdSec(sections, prevSec);
-                      if ((sectionWatchAccumRef.current[prevSec] ?? 0) >= thr) {
-                        markChapterVisitedRef.current(prevSec);
-                      }
-                    }
                     ytLastSectionRef.current = idx;
-                  }
-
-                  const lastIdx = sections.length - 1;
-                  if (activelyWatching && idx === lastIdx) {
-                    const thrLast = sectionWatchThresholdSec(sections, lastIdx);
-                    if ((sectionWatchAccumRef.current[lastIdx] ?? 0) >= thrLast) {
-                      markChapterVisitedRef.current(lastIdx);
-                    }
                   }
                 }
 
@@ -1162,6 +1236,8 @@ export default function Home() {
 
     setLoadingQuote(pickQuote("student"));
     setError(null);
+    setInsightsRetryKey(0);
+    setInsightsError(null);
     setResult(null);
     setStudyMaterials(null);
     setStepIdx(0);
@@ -1187,7 +1263,10 @@ export default function Home() {
       const data = await res.json();
       if (!res.ok) { setStage("error"); setError(data.error ?? "Processing failed."); return; }
 
-      setResult(data);
+      const rawTranscript = data.transcript as TranscriptEntry[] | undefined;
+      insightsTranscriptRef.current = Array.isArray(rawTranscript) && rawTranscript.length > 0 ? rawTranscript : null;
+      const { transcript: _omitTr, ...resultPayload } = data as typeof data & { transcript?: TranscriptEntry[] };
+      setResult(resultPayload as ProcessResult);
       setStudyMaterials(data.studyMaterials);
       setChatHistory([]);
       setStage("complete");
@@ -1214,7 +1293,7 @@ export default function Home() {
         channelName: data.metadata.channelName,
         thumbnailUrl: data.metadata.thumbnailUrl,
         savedAt: Date.now(),
-        result: data,
+        result: resultPayload as ProcessResult,
         studyMaterials: data.studyMaterials,
         chatHistory: [],
       };
@@ -1250,6 +1329,10 @@ export default function Home() {
   };
 
   const reset = () => {
+    insightsTranscriptRef.current = null;
+    setInsightsLoading(false);
+    setInsightsError(null);
+    setInsightsRetryKey(0);
     setResult(null); setStudyMaterials(null);
     setStage("idle"); setError(null); setUrl("");
     setProgress(0); setChatHistory([]);
@@ -1790,7 +1873,6 @@ export default function Home() {
 
                   <div className="text-center mb-8">
                     <h2 className="font-serif text-3xl mb-2">Analyzing your lecture</h2>
-                    <p className="text-sm" style={{ color: "var(--muted-foreground)" }}>Usually takes 20–35 seconds</p>
                     <p className="text-sm mt-3 italic" style={{ color: "var(--muted-foreground)" }}>&ldquo;{loadingQuote}&rdquo;</p>
                   </div>
 
@@ -1941,7 +2023,6 @@ export default function Home() {
                               materials={studyMaterials}
                               onSeek={seek}
                               reviewed={lectureProgress.cardsReviewed}
-                              skillLevel={learnerProfile?.overallLevel}
                               onReviewed={(idx) => {
                                 giveXP("reviewFlashcard", { label: "Flashcard reviewed" });
                                 updateLectureProgress((p) => {
@@ -1996,7 +2077,20 @@ export default function Home() {
                               }}
                             />
                           )}
-                          {tab === "insights" && <InsightsTab insights={result.insights} concepts={studyMaterials.concepts} onSeek={seek} weakTopics={lectureProgress.weakTopics} />}
+                          {tab === "insights" && (
+                            <InsightsTab
+                              insights={result.insights}
+                              insightsLoading={insightsLoading}
+                              insightsError={insightsError}
+                              onRetryInsights={() => {
+                                setInsightsError(null);
+                                setInsightsRetryKey((k) => k + 1);
+                              }}
+                              concepts={studyMaterials.concepts}
+                              onSeek={seek}
+                              weakTopics={lectureProgress.weakTopics}
+                            />
+                          )}
                           {tab === "chat" && (
                             <ChatTab
                               result={result}
@@ -2097,11 +2191,30 @@ export default function Home() {
                     <ConceptsPanel concepts={studyMaterials.concepts} />
                     <StatsPanel lecture={result.lecture} materials={studyMaterials} />
                     <AchievementsPanel achievements={lectureProgress.achievements} />
-                    {result.insights && (
+                    {(result.insights || insightsLoading || insightsError) && (
                       <div className="surface rounded-xl p-4">
                         <div className="text-[10px] font-mono uppercase tracking-wider mb-2" style={{ color: "var(--muted-foreground)" }}>Difficulty</div>
-                        <div className="text-sm font-semibold capitalize mb-0.5">{result.insights.difficulty}</div>
-                        <div className="text-xs" style={{ color: "var(--muted-foreground)" }}>~{result.insights.estimatedStudyMinutes} min to master</div>
+                        {insightsLoading && !result.insights ? (
+                          <div className="space-y-2">
+                            <div className="h-4 w-32 rounded-md animate-pulse" style={{ background: "var(--border)" }} />
+                            <div className="h-3 w-full rounded-md animate-pulse" style={{ background: "var(--border)" }} />
+                            <div className="h-3 w-[85%] rounded-md animate-pulse" style={{ background: "var(--border)" }} />
+                            <p className="text-[11px] mt-2 flex items-center gap-2" style={{ color: "var(--muted-foreground)" }}>
+                              <Loader2 className="h-3.5 w-3.5 animate-spin shrink-0" />
+                              Generating insights in the background…
+                            </p>
+                          </div>
+                        ) : result.insights ? (
+                          <>
+                            <div className="text-sm font-semibold capitalize mb-0.5">{result.insights.difficulty}</div>
+                            <div className="text-[11px] leading-snug space-y-0.5" style={{ color: "var(--muted-foreground)" }}>
+                              <div>~{result.insights.estimatedStudyMinutes} min extra practice typical</div>
+                              <div className="opacity-80">beyond watching; faster or slower depends on you</div>
+                            </div>
+                          </>
+                        ) : (
+                          <p className="text-[11px]" style={{ color: "var(--destructive)" }}>{insightsError}</p>
+                        )}
                       </div>
                     )}
                   </aside>
@@ -2909,10 +3022,10 @@ function SummaryTab({ materials, skillLevel }: { materials: StudyMaterials; skil
       </div>
       <AnimatePresence mode="wait">
         <motion.div key={mode} initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -4 }} transition={{ duration: 0.2 }}>
-          {materials.summaries[mode].split("\n\n").filter(p => p.trim()).map((para, i) => (
-            <p key={i} className="leading-[1.8] mb-4 text-[15px]" style={{ color: "color-mix(in oklab, var(--foreground) 88%, transparent)" }}>
-              {renderMarkdown(para)}
-            </p>
+          {materials.summaries[mode].split(/\n\n+/).filter((p) => p.trim()).map((block, i) => (
+            <div key={i} className="mb-4 text-[15px] leading-relaxed [&_ul]:my-2 [&_ol]:my-2" style={{ color: "color-mix(in oklab, var(--foreground) 88%, transparent)" }}>
+              {renderChatMarkdown(block.trim())}
+            </div>
           ))}
         </motion.div>
       </AnimatePresence>
@@ -2972,25 +3085,13 @@ function FlashcardsTab({
   onSeek,
   reviewed,
   onReviewed,
-  skillLevel,
 }: {
   materials: StudyMaterials;
   onSeek: (s: number) => void;
   reviewed: number[];
   onReviewed: (idx: number) => void;
-  skillLevel?: SkillLevel;
 }) {
-  const orderedCards = useMemo(() => {
-    const cards = materials.flashcards;
-    if (!skillLevel || skillLevel === "intermediate") return cards;
-    const sorted = [...cards];
-    if (skillLevel === "beginner") {
-      sorted.sort((a, b) => a.answer.length - b.answer.length);
-    } else {
-      sorted.sort((a, b) => b.timestamp - a.timestamp || b.answer.length - a.answer.length);
-    }
-    return sorted;
-  }, [materials.flashcards, skillLevel]);
+  const orderedCards = useMemo(() => sortFlashcardsChronologically(materials.flashcards), [materials.flashcards]);
 
   const [idx, setIdx] = useState(0);
   const [flipped, setFlipped] = useState(false);
@@ -3215,7 +3316,10 @@ function QuizTab({ materials, skillLevel, onCompleted }: {
   skillLevel?: SkillLevel;
   onCompleted: (pct: number, weakTopics: string[]) => void;
 }) {
-  const cards = useMemo(() => materials.flashcards.filter((c) => c.question && c.answer), [materials.flashcards]);
+  const cards = useMemo(
+    () => sortFlashcardsChronologically(materials.flashcards.filter((c) => c.question && c.answer)),
+    [materials.flashcards],
+  );
   const [difficulty, setDifficulty] = useState<QuizDifficulty | null>(null);
   const [quizRound, setQuizRound] = useState(0);
 
@@ -3571,7 +3675,23 @@ function QuizTab({ materials, skillLevel, onCompleted }: {
 // ──────────────────────────────────────────────────────────────────────────
 type ConfidenceLevel = "know" | "fuzzy" | "no";
 
-function InsightsTab({ insights, concepts, onSeek, weakTopics }: { insights?: LectureInsights; concepts: string[]; onSeek: (s: number) => void; weakTopics?: string[] }) {
+function InsightsTab({
+  insights,
+  insightsLoading,
+  insightsError,
+  onRetryInsights,
+  concepts,
+  onSeek,
+  weakTopics,
+}: {
+  insights?: LectureInsights;
+  insightsLoading?: boolean;
+  insightsError?: string | null;
+  onRetryInsights?: () => void;
+  concepts: string[];
+  onSeek: (s: number) => void;
+  weakTopics?: string[];
+}) {
   const [confidence, setConfidence] = useState<Record<string, ConfidenceLevel>>({});
 
   const difficultyColor = { easy: "var(--success)", medium: "var(--warning)", hard: "var(--destructive)" } as const;
@@ -3587,13 +3707,39 @@ function InsightsTab({ insights, concepts, onSeek, weakTopics }: { insights?: Le
 
   return (
     <div className="space-y-8">
+      {insightsLoading && !insights && (
+        <div className="surface rounded-xl p-6 flex flex-col items-center justify-center gap-4 text-center">
+          <Loader2 className="h-10 w-10 animate-spin shrink-0" style={{ color: "var(--primary)" }} />
+          <div>
+            <p className="font-medium mb-1">Analyzing difficulty and takeaways</p>
+            <p className="text-xs" style={{ color: "var(--muted-foreground)" }}>
+              Summaries and flashcards are already ready. Insights load right after.
+            </p>
+          </div>
+        </div>
+      )}
+      {insightsError && !insights && (
+        <div className="surface rounded-xl p-6 border" style={{ borderColor: "color-mix(in oklab, var(--destructive) 35%, transparent)" }}>
+          <p className="text-sm mb-4" style={{ color: "var(--destructive)" }}>{insightsError}</p>
+          <button
+            type="button"
+            onClick={onRetryInsights}
+            className="text-xs font-medium px-4 py-2 rounded-lg border transition hover:opacity-90"
+            style={{ borderColor: "var(--border)", color: "var(--foreground)" }}
+          >
+            Retry insights
+          </button>
+        </div>
+      )}
       {/* Header */}
       <div className="flex flex-wrap items-baseline justify-between gap-2">
         <h3 className="font-serif text-2xl">Lecture insights.</h3>
         {insights && (
           <div className="text-xs font-mono uppercase tracking-wider flex items-center gap-3" style={{ color: "var(--muted-foreground)" }}>
             <span>{difficultyLabel}</span><span className="opacity-30">·</span>
-            <span>~{insights.estimatedStudyMinutes} min to master</span>
+            <span title="Rough guide for notes, drills, and recall—not passive viewing, and not a judgment of your ability">
+              ~{insights.estimatedStudyMinutes} min typical practice beyond the video
+            </span>
           </div>
         )}
       </div>

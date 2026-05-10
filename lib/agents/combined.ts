@@ -1,7 +1,7 @@
 import { invokeAgent, MODEL_HAIKU, MODEL_SONNET } from "../bedrock";
 import { TranscriptEntry, VideoMetadata } from "../youtube";
 import { StructuredLecture } from "./structurer";
-import { StudyMaterials } from "./studyMaterialGenerator";
+import { StudyMaterials, sortFlashcardsChronologically } from "./studyMaterialGenerator";
 
 export interface CombinedOutput {
   lecture: StructuredLecture;
@@ -74,19 +74,29 @@ Rules:
   }
 }
 
-// Agent B: summaries (Sonnet, quality matters)
+// Agent B: summaries (Sonnet for writing quality; runs in parallel with Haiku outline + cards)
 async function buildSummaries(
   transcript: string,
   metadata: VideoMetadata
 ): Promise<StudyMaterials["summaries"]> {
-  const sys = `You are a study coach. Return ONLY valid JSON, no markdown, no explanation. Never use em dashes in any text. Use commas, periods, or colons instead.`;
+  const sys = `You are a study coach. Return ONLY valid JSON, no markdown, no explanation outside the strings. Never use the em dash or en dash Unicode characters in any summary text.
+
+Summary formatting rules (critical):
+- Do not chain enumerated topics with spaced hyphens (avoid "concept A - concept B - concept C" jammed into one paragraph).
+- Aim for a natural mix you choose: introductory or framing sentences as prose where they read well; switch to Markdown-style bullet lists (each line begins with "- ") when outlining several comparable items, steps, or topics. Blank lines (double newlines) inside the JSON strings separate prose blocks from bullet blocks.
+- If a section stays narrative, keep it as uninterrupted paragraphs rather than forcing bullets everywhere.
+- If you use bullets, each bullet must start its own line with "- "; use **bold** for short labels sparingly (**Term**: explanation works).
+- Ordinary hyphens in compounds (self-paced, plug-in) stay ASCII.
+`;
   const msg = `Title: "${metadata.title}"
 Transcript: ${transcript}
 
 Return exactly:
-{"short":"~80-word punchy overview","medium":"~220-word summary with key points","full":"~450-word comprehensive breakdown"}`;
+{"short":"~80-word punchy overview","medium":"~220-word summary with key points","full":"~450-word comprehensive breakdown"}
 
-  const raw = await invokeAgent(sys, msg, 1400, MODEL_SONNET);
+Use bullets in medium/long only when lists genuinely aid scanning; otherwise polished prose paragraphs are preferable.`;
+
+  const raw = await invokeAgent(sys, msg, 2600, MODEL_SONNET);
   try {
     const m = raw.match(/\{[\s\S]*\}/);
     if (!m) throw new Error("No JSON");
@@ -116,7 +126,10 @@ Transcript: ${transcript}
 Return exactly:
 {"flashcards":[{"question":"Q","answer":"A","timestamp":0,"sectionTitle":"section"}],"concepts":["concept 1","concept 2"]}
 
-Rules: exactly ${numFlashcards} flashcards, exactly ${numConcepts} concepts (≤6 words each). Timestamps are integers 0–${totalDuration}.`;
+Rules:
+- Exactly ${numFlashcards} flashcards, exactly ${numConcepts} concepts (≤6 words each). Timestamps are integers 0–${totalDuration}.
+- Emit flashcards in chronological order by timestamp (earliest moment in the lecture first, latest last).
+- Each timestamp should match when the answered idea is first substantially covered (not arbitrary ordering).`;
 
   const maxTok = Math.max(900, numFlashcards * 120 + numConcepts * 30);
   const raw = await invokeAgent(sys, msg, maxTok, MODEL_HAIKU);
@@ -124,8 +137,9 @@ Rules: exactly ${numFlashcards} flashcards, exactly ${numConcepts} concepts (≤
     const m = raw.match(/\{[\s\S]*\}/);
     if (!m) throw new Error("No JSON");
     const p = JSON.parse(m[0]) as { flashcards: StudyMaterials["flashcards"]; concepts: StudyMaterials["concepts"] };
+    const list = Array.isArray(p.flashcards) ? p.flashcards : [];
     return {
-      flashcards: Array.isArray(p.flashcards) ? p.flashcards : [],
+      flashcards: sortFlashcardsChronologically(list),
       concepts: Array.isArray(p.concepts) ? p.concepts : [],
     };
   } catch {
@@ -144,7 +158,6 @@ export async function processTranscript(
 
   const { sections: numSections, flashcards: numFlashcards, concepts: numConcepts } = getCountsForDuration(totalDuration);
 
-  // Outline agent needs timestamps → richer sample; summary/cards need content → denser sample
   const transcriptForOutline = sampleTranscript(entries, 6000);
   const transcriptForContent = sampleTranscript(entries, 8000);
 

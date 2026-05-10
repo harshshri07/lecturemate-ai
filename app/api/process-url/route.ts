@@ -1,7 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { extractVideoId, fetchTranscript, fetchVideoMetadata, validateYouTubeUrl } from "@/lib/youtube";
 import { processTranscript } from "@/lib/agents/combined";
-import { generateInsights } from "@/lib/agents/insights";
 import { buildLectureChunks } from "@/lib/rag/chunkLecture";
 import { indexLectureForRag } from "@/lib/rag/vectorStore";
 
@@ -52,11 +51,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "No transcript content found for this video." }, { status: 422 });
     }
 
-    // All agents run in parallel — total time = slowest call, not sum
-    const [{ lecture, studyMaterials }, insights] = await Promise.all([
-      processTranscript(transcript, metadata),
-      generateInsights(transcript, metadata),
-    ]);
+    const { lecture, studyMaterials } = await processTranscript(transcript, metadata);
 
     void (async () => {
       try {
@@ -67,7 +62,13 @@ export async function POST(req: NextRequest) {
       }
     })();
 
-    return NextResponse.json({ videoId, metadata, lecture, studyMaterials, insights });
+    return NextResponse.json({
+      videoId,
+      metadata,
+      lecture,
+      studyMaterials,
+      transcript,
+    });
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : "An unexpected error occurred.";
     const status =
