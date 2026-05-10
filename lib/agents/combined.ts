@@ -26,14 +26,14 @@ function sampleTranscript(entries: TranscriptEntry[], maxChars: number): string 
   return text.length > maxChars ? text.slice(0, maxChars) + "…" : text;
 }
 
-// Agent A — outline (Haiku, fast, cheap)
+// Agent A: outline (Haiku, fast, cheap)
 async function buildOutline(
   transcript: string,
   metadata: VideoMetadata,
   totalDuration: number,
   numSections: number
 ): Promise<StructuredLecture> {
-  const sys = `You are a lecture analyst. Return ONLY valid JSON — no markdown, no explanation.`;
+  const sys = `You are a lecture analyst. Return ONLY valid JSON, no markdown, no explanation. Never use em dashes in any text.`;
   const msg = `Title: "${metadata.title}" | Duration: ${totalDuration}s
 Transcript (evenly sampled): ${transcript}
 
@@ -74,12 +74,12 @@ Rules:
   }
 }
 
-// Agent B — summaries (Sonnet, quality matters)
+// Agent B: summaries (Sonnet, quality matters)
 async function buildSummaries(
   transcript: string,
   metadata: VideoMetadata
 ): Promise<StudyMaterials["summaries"]> {
-  const sys = `You are a study coach. Return ONLY valid JSON — no markdown, no explanation.`;
+  const sys = `You are a study coach. Return ONLY valid JSON, no markdown, no explanation. Never use em dashes in any text. Use commas, periods, or colons instead.`;
   const msg = `Title: "${metadata.title}"
 Transcript: ${transcript}
 
@@ -101,7 +101,7 @@ Return exactly:
   }
 }
 
-// Agent C — flashcards + concepts (Haiku, fast, cheap)
+// Agent C: flashcards + concepts (Haiku, fast, cheap)
 async function buildCards(
   transcript: string,
   metadata: VideoMetadata,
@@ -109,7 +109,7 @@ async function buildCards(
   numFlashcards: number,
   numConcepts: number
 ): Promise<{ flashcards: StudyMaterials["flashcards"]; concepts: StudyMaterials["concepts"] }> {
-  const sys = `You are a study coach. Return ONLY valid JSON — no markdown, no explanation.`;
+  const sys = `You are a study coach. Return ONLY valid JSON, no markdown, no explanation. Never use em dashes in any text. Use commas, periods, or colons instead.`;
   const msg = `Title: "${metadata.title}" | Duration: ${totalDuration}s
 Transcript: ${transcript}
 
@@ -133,7 +133,7 @@ Rules: exactly ${numFlashcards} flashcards, exactly ${numConcepts} concepts (≤
   }
 }
 
-// Orchestrator — run A, B, C in parallel
+// Orchestrator: run A, B, C in parallel
 export async function processTranscript(
   entries: TranscriptEntry[],
   metadata: VideoMetadata

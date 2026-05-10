@@ -8,11 +8,15 @@ const client = new BedrockRuntimeClient({
   },
 });
 
-// Model lineup — picked per task for the best speed/cost/quality tradeoff
+// Model lineup: picked per task for the best speed/cost/quality tradeoff
 export const MODEL_SONNET     = "us.anthropic.claude-sonnet-4-6";                  // quality-sensitive summaries
 export const MODEL_HAIKU      = "us.anthropic.claude-haiku-4-5-20251001-v1:0";     // structured JSON (outline, cards, insights)
 export const MODEL_NOVA_MICRO = "us.amazon.nova-micro-v1:0";                       // ultrafast retrieval (search)
-export const MODEL_NOVA_PRO   = "us.amazon.nova-pro-v1:0";                         // multilingual translation
+export const MODEL_NOVA_PRO   = "us.amazon.nova-pro-v1:0";                         // multilingual
+
+function stripEmDashes(text: string): string {
+  return text.replace(/\u2014/g, ",").replace(/\u2013/g, "-");
+}
 
 export async function invokeAgent(
   systemPrompt: string,
@@ -32,7 +36,7 @@ export async function invokeAgent(
     });
 
     const response = await client.send(command);
-    return response.output?.message?.content?.[0]?.text ?? "";
+    return stripEmDashes(response.output?.message?.content?.[0]?.text ?? "");
   } catch (error: unknown) {
     if (error instanceof Error && error.name === "AbortError") {
       throw new Error("Bedrock request timed out");
@@ -43,7 +47,7 @@ export async function invokeAgent(
   }
 }
 
-// Streaming chat — yields text chunks as they arrive from Bedrock
+// Streaming chat: yields text chunks as they arrive from Bedrock
 export async function streamChat(
   systemPrompt: string,
   messages: Message[],
@@ -64,7 +68,7 @@ export async function streamChat(
         if (!response.stream) { controller.close(); return; }
         for await (const event of response.stream) {
           const text = event.contentBlockDelta?.delta?.text;
-          if (text) controller.enqueue(text);
+          if (text) controller.enqueue(stripEmDashes(text));
         }
       } catch (err) {
         controller.error(err);

@@ -18,7 +18,7 @@ export interface FacultyAuditReport {
   clarity: string[];
 }
 
-const SYSTEM = `You are an expert instructional designer and accessibility reviewer. You produce a PRIVATE, voluntary teaching-improvement audit for the instructor who recorded or will publish this lecture. This is NOT surveillance: do not infer student demographics, grades, or identities. Base feedback only on observable transcript content (what was said, structure, jargon, pacing cues, signposting). Return ONLY valid JSON — no markdown, no code fences, no explanation.`;
+const SYSTEM = `You are an expert instructional designer and accessibility reviewer. You produce a PRIVATE, voluntary teaching-improvement audit for the instructor who recorded or will publish this lecture. This is NOT surveillance: do not infer student demographics, grades, or identities. Base feedback only on observable transcript content (what was said, structure, jargon, pacing cues, signposting). Return ONLY valid JSON, no markdown, no code fences, no explanation. Never use em dashes in any text. Use commas, periods, or colons instead.`;
 
 export async function generateFacultyAudit(
   entries: TranscriptEntry[],
@@ -46,9 +46,9 @@ Return exactly this JSON shape:
   "fixes": [
     { "priority": 1, "title": "short title", "rationale": "why it matters", "timestamp": 120, "suggestedRewrite": "optional concrete rewrite or script line" }
   ],
-  "accessibility": ["bullet about captions, pace, jargon, visuals, or audio clarity — transcript-observable only"],
-  "equity": ["bullet about inclusive language, assumptions in examples, restraint — no demographic guessing"],
-  "clarity": ["bullet about learning goals, signposting, definitions, recap — observable in transcript"]
+  "accessibility": ["bullet about captions, pace, jargon, visuals, or audio clarity, transcript-observable only"],
+  "equity": ["bullet about inclusive language, assumptions in examples, restraint, no demographic guessing"],
+  "clarity": ["bullet about learning goals, signposting, definitions, recap, observable in transcript"]
 }
 
 Rules:

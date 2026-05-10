@@ -75,7 +75,7 @@ export default function SemanticSearch({ lecture, onSeek }: SemanticSearchProps)
         <span className="text-xl">🔍</span> Semantic Search
       </h2>
       <p className="text-sm text-gray-500 dark:text-gray-400 mb-4">
-        Ask a question about this lecture — Agent 3 will find the exact moment.
+        Ask a question about this lecture. Agent 3 will find the exact moment.
       </p>
 
       <form onSubmit={handleSubmit} className="relative mb-4">

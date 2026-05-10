@@ -18,7 +18,7 @@ export interface StudyMaterials {
   concepts: string[];
 }
 
-const SYSTEM_PROMPT = `You are a study coach. Given structured lecture sections, generate flashcards, multi-depth summaries, and key concepts — always citing the source timestamp. Return ONLY valid JSON with no markdown, no code fences, no extra explanation.`;
+const SYSTEM_PROMPT = `You are a study coach. Given structured lecture sections, generate flashcards, multi-depth summaries, and key concepts, always citing the source timestamp. Return ONLY valid JSON with no markdown, no code fences, no extra explanation. IMPORTANT: Never use em dashes (the long dash character) in any text. Use commas, periods, or colons instead.`;
 
 export async function generateStudyMaterials(
   lecture: StructuredLecture
@@ -53,8 +53,8 @@ Generate study materials in exactly this JSON format:
   },
   "flashcards": [
     {
-      "question": "Clear question testing understanding",
-      "answer": "Concise, complete answer",
+      "question": "Clear, specific question testing understanding of a concept",
+      "answer": "Concise, complete answer (1-2 sentences max)",
       "timestamp": 0,
       "sectionTitle": "Section name"
     }
@@ -63,7 +63,10 @@ Generate study materials in exactly this JSON format:
 }
 
 Requirements:
-- Create 8-15 flashcards spread across different sections
+- Create 12-20 flashcards spread across different sections. Each must be unique and non-repetitive.
+- Questions should test real understanding, not just recall. Include "why", "how", and "what happens when" questions.
+- Answers must be concise (1-2 sentences) so they work well as quiz options.
+- Make sure each flashcard answer is distinct from other answers (no two answers should be too similar).
 - Timestamp for each flashcard must be the startTime of its section (integer seconds)
 - List 10-15 key concepts as short strings
 - All summaries must be substantive and accurate`;

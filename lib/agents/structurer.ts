@@ -15,7 +15,7 @@ export interface StructuredLecture {
   sections: LectureSection[];
 }
 
-const SYSTEM_PROMPT = `You are a lecture analyst. Your only job is to segment a raw transcript into logical topic blocks and produce a clean structured outline with timestamps. You must return ONLY valid JSON with no extra commentary, markdown, or explanation. Never truncate the JSON.`;
+const SYSTEM_PROMPT = `You are a lecture analyst. Your only job is to segment a raw transcript into logical topic blocks and produce a clean structured outline with timestamps. You must return ONLY valid JSON with no extra commentary, markdown, or explanation. Never truncate the JSON. Never use em dashes in any text output. Use commas, periods, or colons instead.`;
 
 export async function structureTranscript(
   entries: TranscriptEntry[],

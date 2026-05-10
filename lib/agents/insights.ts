@@ -24,7 +24,7 @@ export interface LectureInsights {
   keyTakeaways: string[];
 }
 
-const SYSTEM_PROMPT = `You are an expert learning analyst. Analyze a lecture transcript and produce a structured study insight report. Return ONLY valid JSON — no markdown, no code fences, no explanation.`;
+const SYSTEM_PROMPT = `You are an expert learning analyst. Analyze a lecture transcript and produce a structured study insight report. Return ONLY valid JSON, no markdown, no code fences, no explanation. Never use em dashes in any text. Use commas, periods, or colons instead.`;
 
 export async function generateInsights(
   entries: TranscriptEntry[],

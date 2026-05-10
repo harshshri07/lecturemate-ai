@@ -22,7 +22,7 @@ export interface CurriculumMapReport {
   overallNotes: string;
 }
 
-const SYSTEM = `You are an academic quality assurance analyst helping a provost compare what was actually taught in a set of lectures against stated course learning objectives. Use only the provided topic fingerprints (topics, claims, evidence timestamps). Do not invent content not supported by the fingerprints. Return ONLY valid JSON — no markdown, no explanation.`;
+const SYSTEM = `You are an academic quality assurance analyst helping a provost compare what was actually taught in a set of lectures against stated course learning objectives. Use only the provided topic fingerprints (topics, claims, evidence timestamps). Do not invent content not supported by the fingerprints. Return ONLY valid JSON, no markdown, no explanation. Never use em dashes in any text. Use commas, periods, or colons instead.`;
 
 export async function generateCurriculumMap(
   objectives: string[],

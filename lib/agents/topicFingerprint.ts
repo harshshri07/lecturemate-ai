@@ -14,7 +14,7 @@ export interface TopicFingerprint {
   evidence: TopicEvidence[];
 }
 
-const SYSTEM = `You are a curriculum analyst. Given a lecture transcript sample, extract a compact topic fingerprint for mapping against course learning objectives. Return ONLY valid JSON — no markdown, no explanation.`;
+const SYSTEM = `You are a curriculum analyst. Given a lecture transcript sample, extract a compact topic fingerprint for mapping against course learning objectives. Return ONLY valid JSON, no markdown, no explanation. Never use em dashes in any text. Use commas, periods, or colons instead.`;
 
 export async function generateTopicFingerprint(
   entries: TranscriptEntry[],
