@@ -1,4 +1,5 @@
 import { YoutubeTranscript } from "youtube-transcript";
+import { getSubtitles } from "youtube-caption-extractor";
 
 export interface VideoMetadata {
   videoId: string;
@@ -37,6 +38,66 @@ export function validateYouTubeUrl(url: string): { valid: boolean; error?: strin
   return { valid: true };
 }
 
+/** Map youtube-caption-extractor rows to our transcript format. */
+function mapExtractorSubtitles(
+  subs: { start: string; dur: string; text: string }[]
+): TranscriptEntry[] {
+  return subs
+    .map((s) => ({
+      text: s.text.trim(),
+      offset: Number.parseFloat(s.start) || 0,
+      duration: Math.max(0.05, Number.parseFloat(s.dur) || 0.2),
+    }))
+    .filter((e) => e.text.length > 0);
+}
+
+/**
+ * Fallback when `youtube-transcript` breaks (YouTube HTML/API changes are common).
+ * Uses InnerTube-style fetches and caption XML, including on Vercel where the old library often fails.
+ */
+async function fetchTranscriptViaExtractor(videoId: string): Promise<TranscriptEntry[] | null> {
+  const languagesToTry = [
+    "en",
+    "en-US",
+    "en-GB",
+    "hi",
+    "bn",
+    "ta",
+    "te",
+    "mr",
+    "gu",
+    "kn",
+    "ml",
+    "es",
+    "fr",
+    "de",
+    "pt",
+    "it",
+    "nl",
+    "pl",
+    "ru",
+    "uk",
+    "zh",
+    "zh-Hans",
+    "ja",
+    "ko",
+    "vi",
+    "th",
+    "id",
+    "ar",
+    "tr",
+  ];
+  for (const lang of languagesToTry) {
+    try {
+      const subs = await getSubtitles({ videoID: videoId, lang });
+      if (subs.length > 0) return mapExtractorSubtitles(subs);
+    } catch {
+      /* try next language */
+    }
+  }
+  return null;
+}
+
 export async function fetchTranscript(videoId: string): Promise<TranscriptEntry[]> {
   // Try a sequence of language tracks before giving up.
   // Many lectures have auto-generated captions in the original language but not English.
@@ -44,7 +105,21 @@ export async function fetchTranscript(videoId: string): Promise<TranscriptEntry[
 
   let lastError: unknown = null;
 
-  // 1. Try each language explicitly
+  // 1. Prefer default track first (youtube-transcript)
+  try {
+    const transcript = await YoutubeTranscript.fetchTranscript(videoId);
+    if (transcript.length > 0) {
+      return transcript.map((entry) => ({
+        text: entry.text,
+        offset: entry.offset / 1000,
+        duration: entry.duration / 1000,
+      }));
+    }
+  } catch (err) {
+    lastError = err;
+  }
+
+  // 2. Try each language explicitly
   for (const lang of languagesToTry) {
     try {
       const transcript = await YoutubeTranscript.fetchTranscript(videoId, { lang });
@@ -60,27 +135,21 @@ export async function fetchTranscript(videoId: string): Promise<TranscriptEntry[
     }
   }
 
-  // 2. Last-ditch: ask for whatever caption track exists (no lang param)
+  // 3. Robust fallback (often works when CC is visible but youtube-transcript fails)
   try {
-    const transcript = await YoutubeTranscript.fetchTranscript(videoId);
-    if (transcript.length > 0) {
-      return transcript.map((entry) => ({
-        text: entry.text,
-        offset: entry.offset / 1000,
-        duration: entry.duration / 1000,
-      }));
-    }
+    const viaExtractor = await fetchTranscriptViaExtractor(videoId);
+    if (viaExtractor && viaExtractor.length > 0) return viaExtractor;
   } catch (err) {
     lastError = err;
   }
 
-  // 3. Friendly error
+  // 4. Friendly error
   const msg = lastError instanceof Error ? lastError.message : String(lastError);
   if (msg.includes("private") || msg.includes("unavailable")) {
     throw new Error("This video is private or unavailable. Try a public video.");
   }
   throw new Error(
-    "This video has no captions in any supported language. Try a different lecture, or pick one where the YouTube CC button is visible."
+    "We could not download captions for this video. YouTube sometimes blocks transcript access from hosted servers even when captions play in your browser. Try again in a bit, paste a shorter clip, or use a lecture listed under Try."
   );
 }
 

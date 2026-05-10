@@ -491,17 +491,13 @@ export default function Home() {
   const [gateState, setGateState] = useState<"loading" | "gate" | "app">("loading");
 
   useEffect(() => {
-    // Check localStorage immediately (synchronous) — fastest path
-    const guestConfirmed = (() => {
-      try {
-        return !!(localStorage.getItem("lecturemate_guest_confirmed") || localStorage.getItem("studyai_guest_confirmed"));
-      } catch { return false; }
-    })();
-
-    if (isSignedIn || guestConfirmed) {
+    // Always show the gate first for signed-out users.
+    // Once a user clicks "Continue as guest" we switch to "app" for this run.
+    if (isSignedIn) {
       setGateState("app");
-    } else if (sessionStatus !== "loading") {
-      // Session resolved + not signed in + no guest flag → show gate
+      return;
+    }
+    if (sessionStatus !== "loading") {
       setGateState("gate");
     }
     // While sessionStatus === "loading" we keep gateState = "loading"
