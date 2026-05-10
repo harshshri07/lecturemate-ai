@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { extractVideoId, fetchTranscript, fetchVideoMetadata, validateYouTubeUrl } from "@/lib/youtube";
 import { processTranscript } from "@/lib/agents/combined";
 import { generateInsights } from "@/lib/agents/insights";
+import { buildLectureChunks } from "@/lib/rag/chunkLecture";
+import { indexLectureForRag } from "@/lib/rag/vectorStore";
 
 const rateLimiter = new Map<string, { count: number; resetAt: number }>();
 
@@ -55,6 +57,15 @@ export async function POST(req: NextRequest) {
       processTranscript(transcript, metadata),
       generateInsights(transcript, metadata),
     ]);
+
+    void (async () => {
+      try {
+        const chunks = buildLectureChunks(lecture);
+        await indexLectureForRag(videoId, chunks);
+      } catch {
+        /* RAG indexing is optional (Supabase pgvector + embeddings) */
+      }
+    })();
 
     return NextResponse.json({ videoId, metadata, lecture, studyMaterials, insights });
   } catch (error: unknown) {
