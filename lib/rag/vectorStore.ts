@@ -15,6 +15,26 @@ export function isRagConfigured(): boolean {
   return Boolean(getSupabase());
 }
 
+/** Bounded parallel Titan calls — faster than strict serial, avoids hammering Bedrock. */
+const EMBED_CONCURRENCY = 8;
+
+async function embedTextsWithConcurrency(texts: string[]): Promise<number[][]> {
+  const results: number[][] = new Array(texts.length);
+  let next = 0;
+  const workers = Math.min(EMBED_CONCURRENCY, Math.max(1, texts.length));
+
+  async function worker() {
+    for (;;) {
+      const i = next++;
+      if (i >= texts.length) return;
+      results[i] = await embedText(texts[i]);
+    }
+  }
+
+  await Promise.all(Array.from({ length: workers }, () => worker()));
+  return results;
+}
+
 export async function indexLectureForRag(videoId: string, chunks: { content: string; startTimeSeconds: number; sectionTitle: string; chunkIndex: number }[]): Promise<{ ok: boolean; error?: string }> {
   const sb = getSupabase();
   if (!sb || chunks.length === 0) return { ok: false, error: "RAG not configured or empty lecture" };
@@ -22,26 +42,16 @@ export async function indexLectureForRag(videoId: string, chunks: { content: str
   try {
     await sb.from("lecture_chunks").delete().eq("video_id", videoId);
 
-    const rows: {
-      video_id: string;
-      chunk_index: number;
-      content: string;
-      start_time_seconds: number;
-      section_title: string;
-      embedding: number[];
-    }[] = [];
+    const embeddings = await embedTextsWithConcurrency(chunks.map((c) => c.content));
 
-    for (const c of chunks) {
-      const embedding = await embedText(c.content);
-      rows.push({
-        video_id: videoId,
-        chunk_index: c.chunkIndex,
-        content: c.content,
-        start_time_seconds: c.startTimeSeconds,
-        section_title: c.sectionTitle,
-        embedding,
-      });
-    }
+    const rows = chunks.map((c, i) => ({
+      video_id: videoId,
+      chunk_index: c.chunkIndex,
+      content: c.content,
+      start_time_seconds: c.startTimeSeconds,
+      section_title: c.sectionTitle,
+      embedding: embeddings[i],
+    }));
 
     const { error } = await sb.from("lecture_chunks").upsert(rows, {
       onConflict: "video_id,chunk_index",
