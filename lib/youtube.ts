@@ -325,6 +325,27 @@ async function fetchTranscriptViaExtractor(videoId: string): Promise<TranscriptE
   return null;
 }
 
+/**
+ * Calls our lightweight transcript proxy (deployed on Railway/Render).
+ * Set TRANSCRIPT_PROXY_URL in env, e.g. https://transcript-proxy-production.up.railway.app
+ */
+async function fetchTranscriptViaProxy(videoId: string): Promise<TranscriptEntry[] | null> {
+  const proxyBase = process.env.TRANSCRIPT_PROXY_URL;
+  if (!proxyBase) return null;
+  try {
+    const res = await fetch(`${proxyBase.replace(/\/$/, "")}/transcript/${videoId}`, {
+      signal: AbortSignal.timeout(30000),
+      headers: { Accept: "application/json" },
+    });
+    if (!res.ok) return null;
+    const data = (await res.json()) as { transcript?: TranscriptEntry[] };
+    if (data.transcript && data.transcript.length > 0) return data.transcript;
+  } catch {
+    /* proxy unavailable */
+  }
+  return null;
+}
+
 export async function fetchTranscript(videoId: string): Promise<TranscriptEntry[]> {
   // Try a sequence of language tracks before giving up.
   // Many lectures have auto-generated captions in the original language but not English.
@@ -362,7 +383,15 @@ export async function fetchTranscript(videoId: string): Promise<TranscriptEntry[
     }
   }
 
-  // 3. Piped proxy path (before caption-extractor): different egress; often works on Vercel when YouTube blocks datacenter IPs.
+  // 3. Dedicated transcript proxy (Railway/Render) — separate egress IPs from Vercel
+  try {
+    const viaProxy = await fetchTranscriptViaProxy(videoId);
+    if (viaProxy && viaProxy.length > 0) return viaProxy;
+  } catch (err) {
+    lastError = err;
+  }
+
+  // 4. Piped proxy path (before caption-extractor): different egress; often works on Vercel when YouTube blocks datacenter IPs.
   try {
     const viaPiped = await fetchTranscriptViaPipedBackends(videoId);
     if (viaPiped && viaPiped.length > 0) return viaPiped;
