@@ -351,6 +351,8 @@ export async function fetchTranscript(videoId: string): Promise<TranscriptEntry[
   // put them first in the language list. Falls back to a broad static list when
   // no API key is configured or the call fails.
   const apiLanguages = await fetchCaptionLanguages(videoId);
+  console.log(`[fetchTranscript] videoId=${videoId}  API caption tracks:`, apiLanguages.length ? apiLanguages : "(none — no API key or call failed)");
+
   const fallbackLanguages = ["en", "en-US", "en-GB", "es", "fr", "de", "hi", "zh", "ja", "ko", "pt", "ru"];
   const languagesToTry = apiLanguages.length > 0
     ? [...new Set([...apiLanguages, ...fallbackLanguages])]
@@ -362,14 +364,17 @@ export async function fetchTranscript(videoId: string): Promise<TranscriptEntry[
   try {
     const transcript = await YoutubeTranscript.fetchTranscript(videoId);
     if (transcript.length > 0) {
+      console.log(`[fetchTranscript] ✅ strategy 1 (youtube-transcript default)  entries=${transcript.length}`);
       return transcript.map((entry) => ({
         text: entry.text,
         offset: entry.offset / 1000,
         duration: entry.duration / 1000,
       }));
     }
+    console.warn(`[fetchTranscript] strategy 1 returned empty array`);
   } catch (err) {
     lastError = err;
+    console.warn(`[fetchTranscript] strategy 1 failed:`, err instanceof Error ? err.message : err);
   }
 
   // 2. Try each language explicitly
@@ -377,6 +382,7 @@ export async function fetchTranscript(videoId: string): Promise<TranscriptEntry[
     try {
       const transcript = await YoutubeTranscript.fetchTranscript(videoId, { lang });
       if (transcript.length > 0) {
+        console.log(`[fetchTranscript] ✅ strategy 2 (youtube-transcript lang=${lang})  entries=${transcript.length}`);
         return transcript.map((entry) => ({
           text: entry.text,
           offset: entry.offset / 1000,
@@ -385,46 +391,69 @@ export async function fetchTranscript(videoId: string): Promise<TranscriptEntry[
       }
     } catch (err) {
       lastError = err;
+      console.warn(`[fetchTranscript] strategy 2 lang=${lang} failed:`, err instanceof Error ? err.message : err);
     }
   }
 
   // 3. Dedicated transcript proxy (Railway/Render) — separate egress IPs from Vercel
   try {
     const viaProxy = await fetchTranscriptViaProxy(videoId);
-    if (viaProxy && viaProxy.length > 0) return viaProxy;
+    if (viaProxy && viaProxy.length > 0) {
+      console.log(`[fetchTranscript] ✅ strategy 3 (proxy)  entries=${viaProxy.length}`);
+      return viaProxy;
+    }
+    console.warn(`[fetchTranscript] strategy 3 (proxy) returned null/empty`);
   } catch (err) {
     lastError = err;
+    console.warn(`[fetchTranscript] strategy 3 (proxy) failed:`, err instanceof Error ? err.message : err);
   }
 
   // 4. Piped proxy path (before caption-extractor): different egress; often works on Vercel when YouTube blocks datacenter IPs.
   try {
     const viaPiped = await fetchTranscriptViaPipedBackends(videoId);
-    if (viaPiped && viaPiped.length > 0) return viaPiped;
+    if (viaPiped && viaPiped.length > 0) {
+      console.log(`[fetchTranscript] ✅ strategy 4 (Piped)  entries=${viaPiped.length}`);
+      return viaPiped;
+    }
+    console.warn(`[fetchTranscript] strategy 4 (Piped) returned null/empty`);
   } catch (err) {
     lastError = err;
+    console.warn(`[fetchTranscript] strategy 4 (Piped) failed:`, err instanceof Error ? err.message : err);
   }
 
-  // 4. youtube-caption-extractor (InnerTube-style; can still fail on strict blocks)
+  // 5. youtube-caption-extractor (InnerTube-style; can still fail on strict blocks)
   try {
     const viaExtractor = await fetchTranscriptViaExtractor(videoId);
-    if (viaExtractor && viaExtractor.length > 0) return viaExtractor;
+    if (viaExtractor && viaExtractor.length > 0) {
+      console.log(`[fetchTranscript] ✅ strategy 5 (caption-extractor)  entries=${viaExtractor.length}`);
+      return viaExtractor;
+    }
+    console.warn(`[fetchTranscript] strategy 5 (caption-extractor) returned null/empty`);
   } catch (err) {
     lastError = err;
+    console.warn(`[fetchTranscript] strategy 5 (caption-extractor) failed:`, err instanceof Error ? err.message : err);
   }
 
-  // 5. Second Piped pass after cooldown (rate limits / transient 5xx)
+  // 6. Second Piped pass after cooldown (rate limits / transient 5xx)
   if (isLikelyServerlessEgress()) {
+    console.log(`[fetchTranscript] serverless env detected — retrying Piped after 900ms cooldown…`);
     try {
       await sleep(900);
       const viaPiped2 = await fetchTranscriptViaPipedBackends(videoId);
-      if (viaPiped2 && viaPiped2.length > 0) return viaPiped2;
+      if (viaPiped2 && viaPiped2.length > 0) {
+        console.log(`[fetchTranscript] ✅ strategy 6 (Piped retry)  entries=${viaPiped2.length}`);
+        return viaPiped2;
+      }
+      console.warn(`[fetchTranscript] strategy 6 (Piped retry) returned null/empty`);
     } catch (err) {
       lastError = err;
+      console.warn(`[fetchTranscript] strategy 6 (Piped retry) failed:`, err instanceof Error ? err.message : err);
     }
   }
 
-  // 6. Friendly error
+  // 7. Friendly error
   const msg = lastError instanceof Error ? lastError.message : String(lastError);
+  console.error(`[fetchTranscript] ❌ all strategies exhausted for videoId=${videoId}  lastError=${msg}`);
   if (msg.includes("private") || msg.includes("unavailable")) {
     throw new Error("This video is private or unavailable. Try a public video.");
   }
