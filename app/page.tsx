@@ -2341,9 +2341,9 @@ export default function Home() {
                 </p>
                 <div className="grid gap-4 md:grid-cols-2">
                   <div>
-                    <label className="text-[10px] font-mono uppercase tracking-wider mb-2 block" style={{ color: "var(--muted-foreground)" }}>Lecture URLs (one per line, max 8)</label>
+                    <label className="text-[10px] font-mono uppercase tracking-wider mb-2 block" style={{ color: "var(--muted-foreground)" }}>Lecture URLs (one per line, max 10)</label>
                     <textarea value={provostUrlsText} onChange={(e) => setProvostUrlsText(e.target.value)}
-                      rows={8}
+                      rows={10}
                       className="w-full rounded-xl border p-3 text-sm font-mono resize-y outline-none scroll-thin"
                       style={{ borderColor: "var(--border)", background: "var(--surface)", color: "var(--foreground)" }}
                       placeholder={"https://youtube.com/watch?v=...\nhttps://..."} />

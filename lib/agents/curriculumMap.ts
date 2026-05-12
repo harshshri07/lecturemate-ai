@@ -85,12 +85,16 @@ export async function generateCurriculumMap(
   objectives: string[],
   fingerprints: TopicFingerprint[]
 ): Promise<CurriculumMapReport> {
+  // Trim each fingerprint to keep the prompt manageable for 10 lectures
   const fpSummary = fingerprints.map((f) => ({
     videoId: f.videoId,
-    title: f.lectureTitle,
-    topics: f.lectureTopics,
-    claims: f.keyClaims,
-    evidence: f.evidence,
+    title: f.lectureTitle.slice(0, 80),
+    topics: f.lectureTopics.slice(0, 14),
+    claims: f.keyClaims.slice(0, 8).map(c => c.slice(0, 120)),
+    evidence: f.evidence.slice(0, 10).map(e => ({
+      topic: e.topic.slice(0, 60),
+      timestamps: e.timestamps.slice(0, 2),
+    })),
   }));
 
   const userMessage = `Stated course learning objectives (verbatim from catalog, syllabus, or instructor input):
@@ -122,7 +126,7 @@ Rules:
 - gaps: 3-8 items where objectives are under-served relative to stated promise; redundancies: 2-6 items where topics repeat across lectures.
 - Return ONLY the JSON.`;
 
-  const raw = await invokeAgent(SYSTEM, userMessage, 4000, MODEL_HAIKU);
+  const raw = await invokeAgent(SYSTEM, userMessage, 6000, MODEL_HAIKU);
 
   try {
     const m = raw.match(/\{[\s\S]*\}/);

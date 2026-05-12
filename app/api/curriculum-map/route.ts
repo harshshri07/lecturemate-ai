@@ -4,7 +4,7 @@ import { extractVideoId, fetchTranscript, fetchVideoMetadata, validateYouTubeUrl
 import { generateTopicFingerprint } from "@/lib/agents/topicFingerprint";
 import { generateCurriculumMap } from "@/lib/agents/curriculumMap";
 
-export const maxDuration = 120;
+export const maxDuration = 300; // 10 videos × ~25s each needs headroom beyond 120s
 
 const rateLimiter = new Map<string, { count: number; resetAt: number }>();
 
@@ -59,8 +59,8 @@ export async function POST(req: NextRequest) {
   if (!Array.isArray(urls) || urls.length === 0) {
     return NextResponse.json({ error: "Provide a non-empty urls array." }, { status: 400 });
   }
-  if (urls.length > 8) {
-    return NextResponse.json({ error: "Maximum 8 lecture URLs per request." }, { status: 400 });
+  if (urls.length > 10) {
+    return NextResponse.json({ error: "Maximum 10 lecture URLs per request." }, { status: 400 });
   }
 
   const urlStrings = urls.map((u) => String(u).trim()).filter(Boolean);
@@ -74,8 +74,29 @@ export async function POST(req: NextRequest) {
 
   const perVideo: { videoId: string; url: string; metadata?: { title: string; channelName: string }; error?: string }[] = [];
 
-  const prepList: LecturePrep[] = await Promise.all(
-    urlStrings.map(async (url): Promise<LecturePrep> => {
+  // Process in batches of 3 with a 1.1s gap to respect Supadata's 1/s rate limit
+  async function processBatched<T, R>(
+    items: T[],
+    batchSize: number,
+    fn: (item: T) => Promise<R>,
+    delayMs = 1100,
+  ): Promise<R[]> {
+    const results: R[] = [];
+    for (let i = 0; i < items.length; i += batchSize) {
+      const batch = items.slice(i, i + batchSize);
+      const batchResults = await Promise.all(batch.map(fn));
+      results.push(...batchResults);
+      if (i + batchSize < items.length) {
+        await new Promise<void>(r => setTimeout(r, delayMs));
+      }
+    }
+    return results;
+  }
+
+  const prepList: LecturePrep[] = await processBatched(
+    urlStrings,
+    3,
+    async (url): Promise<LecturePrep> => {
       const validation = validateYouTubeUrl(url);
       if (!validation.valid) {
         return { ok: false, url, videoId: "", error: validation.error ?? "Invalid URL." };
@@ -88,9 +109,7 @@ export async function POST(req: NextRequest) {
         ]);
         if (transcript.length === 0) {
           return {
-            ok: false,
-            url,
-            videoId,
+            ok: false, url, videoId,
             error: "No transcript for this video.",
             metadata: { title: metadata.title, channelName: metadata.channelName },
           };
@@ -100,7 +119,8 @@ export async function POST(req: NextRequest) {
         const msg = e instanceof Error ? e.message : "Failed to fetch lecture.";
         return { ok: false, url, videoId, error: msg };
       }
-    })
+    },
+    1100,
   );
 
   for (const p of prepList) {
@@ -122,8 +142,11 @@ export async function POST(req: NextRequest) {
 
   const okPreps = prepList.filter((p): p is LecturePrepOk => p.ok);
 
-  const fingerprintResults = await Promise.all(
-    okPreps.map((prep) => generateTopicFingerprint(prep.transcript, prep.metadata, prep.videoId))
+  const fingerprintResults = await processBatched(
+    okPreps,
+    5,
+    (prep) => generateTopicFingerprint(prep.transcript, prep.metadata, prep.videoId),
+    0,
   );
 
   const fingerprints = fingerprintResults;

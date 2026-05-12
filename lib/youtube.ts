@@ -353,7 +353,7 @@ type SupadataChunk = { text: string; offset: number; duration: number; lang?: st
  * Large videos (>20 min) return HTTP 202 + jobId instead of the transcript directly.
  */
 async function pollSupadataJob(apiKey: string, jobId: string): Promise<TranscriptEntry[]> {
-  const maxAttempts = 60;
+  const maxAttempts = 18; // 18 × 1s = 18s max polling, keeps each video under 25s total
   for (let i = 0; i < maxAttempts; i++) {
     await sleep(1000);
     const res = await fetch(`https://api.supadata.ai/v1/transcript/${jobId}`, {
@@ -383,7 +383,7 @@ async function pollSupadataJob(apiKey: string, jobId: string): Promise<Transcrip
     }
     if (data.status === "failed") throw new Error(`Supadata job failed: ${data.error ?? "unknown"}`);
   }
-  throw new Error("Supadata job timed out after 60 seconds.");
+  throw new Error("Supadata job timed out after 18 seconds.");
 }
 
 /**
@@ -404,7 +404,7 @@ async function fetchTranscriptViaSupadata(videoId: string): Promise<TranscriptEn
   console.log(`[fetchTranscriptViaSupadata] GET ${endpoint}`);
   const res = await fetch(endpoint, {
     headers: { "x-api-key": apiKey },
-    signal: AbortSignal.timeout(35000),
+    signal: AbortSignal.timeout(20000), // 20s for initial request; async jobs then poll for up to 18s
   });
 
   if (!res.ok) {
