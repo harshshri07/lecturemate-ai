@@ -26,7 +26,58 @@ function sampleTranscript(entries: TranscriptEntry[], maxChars: number): string 
   return text.length > maxChars ? text.slice(0, maxChars) + "…" : text;
 }
 
+// ---------------------------------------------------------------------------
+// Dummy content builders — used when every AI call fails (e.g. no AWS creds)
+// ---------------------------------------------------------------------------
+
+function dummyOutline(metadata: VideoMetadata, totalDuration: number, numSections: number): StructuredLecture {
+  const step = Math.ceil(totalDuration / numSections) || 60;
+  return {
+    title: metadata.title,
+    duration: totalDuration,
+    sections: Array.from({ length: numSections }, (_, i) => ({
+      title: `Section ${i + 1}`,
+      startTime: i * step,
+      endTime: Math.min((i + 1) * step, totalDuration),
+      summary: "AI summary unavailable. Check your AWS credentials or Bedrock model access.",
+      rawText: "",
+    })),
+  };
+}
+
+function dummySummaries(transcript: string, metadata: VideoMetadata): StudyMaterials["summaries"] {
+  const words = transcript.replace(/\[\d+s\]/g, "").trim().split(/\s+/).filter(Boolean);
+  const excerpt = (n: number) => words.slice(0, n).join(" ") + (words.length > n ? "…" : "");
+  const note = "(AI model unavailable — showing transcript excerpt as placeholder.)";
+  return {
+    short: `${metadata.title}. ${note}\n\n${excerpt(60)}`,
+    medium: `${metadata.title}\n\n${note}\n\n${excerpt(180)}`,
+    full: `${metadata.title}\n\n${note}\n\n${excerpt(400)}`,
+  };
+}
+
+function dummyCards(
+  metadata: VideoMetadata,
+  totalDuration: number,
+  numFlashcards: number,
+): { flashcards: StudyMaterials["flashcards"]; concepts: StudyMaterials["concepts"] } {
+  const step = Math.ceil(totalDuration / numFlashcards) || 60;
+  const flashcards: StudyMaterials["flashcards"] = Array.from({ length: numFlashcards }, (_, i) => ({
+    question: `What is covered around the ${Math.floor((i * step) / 60)}-minute mark of "${metadata.title}"?`,
+    answer: "AI model unavailable. Review the transcript directly for this section.",
+    timestamp: i * step,
+    sectionTitle: `Section ${i + 1}`,
+  }));
+  const titleWords = metadata.title.split(/\s+/).filter((w) => w.length > 3).slice(0, 8);
+  return {
+    flashcards: sortFlashcardsChronologically(flashcards),
+    concepts: titleWords.length > 0 ? titleWords : ["AI unavailable"],
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Agent A: outline (Haiku, fast, cheap)
+// ---------------------------------------------------------------------------
 async function buildOutline(
   transcript: string,
   metadata: VideoMetadata,
@@ -47,8 +98,8 @@ Rules:
 - No rawText field needed
 - Return ONLY the JSON`;
 
-  const raw = await invokeAgent(sys, msg, Math.max(1400, numSections * 180), MODEL_HAIKU);
   try {
+    const raw = await invokeAgent(sys, msg, Math.max(1400, numSections * 180), MODEL_HAIKU);
     const m = raw.match(/\{[\s\S]*\}/);
     if (!m) throw new Error("No JSON");
     const p = JSON.parse(m[0]) as StructuredLecture;
@@ -65,16 +116,15 @@ Rules:
           }))
         : [{ title: "Full Lecture", startTime: 0, endTime: totalDuration, summary: "", rawText: "" }],
     };
-  } catch {
-    return {
-      title: metadata.title,
-      duration: totalDuration,
-      sections: [{ title: "Full Lecture", startTime: 0, endTime: totalDuration, summary: "", rawText: "" }],
-    };
+  } catch (err) {
+    console.warn("[buildOutline] AI call failed, using dummy outline:", err instanceof Error ? err.message : err);
+    return dummyOutline(metadata, totalDuration, numSections);
   }
 }
 
-// Agent B: summaries (Sonnet for writing quality; runs in parallel with Haiku outline + cards)
+// ---------------------------------------------------------------------------
+// Agent B: summaries (Sonnet for writing quality)
+// ---------------------------------------------------------------------------
 async function buildSummaries(
   transcript: string,
   metadata: VideoMetadata
@@ -96,8 +146,8 @@ Return exactly:
 
 Use bullets in medium/long only when lists genuinely aid scanning; otherwise polished prose paragraphs are preferable.`;
 
-  const raw = await invokeAgent(sys, msg, 2600, MODEL_SONNET);
   try {
+    const raw = await invokeAgent(sys, msg, 2600, MODEL_SONNET);
     const m = raw.match(/\{[\s\S]*\}/);
     if (!m) throw new Error("No JSON");
     const p = JSON.parse(m[0]) as StudyMaterials["summaries"];
@@ -106,12 +156,15 @@ Use bullets in medium/long only when lists genuinely aid scanning; otherwise pol
       medium: p.medium ?? "Summary unavailable.",
       full: p.full ?? "Summary unavailable.",
     };
-  } catch {
-    return { short: "Summary unavailable.", medium: "Summary unavailable.", full: "Summary unavailable." };
+  } catch (err) {
+    console.warn("[buildSummaries] AI call failed, using dummy summaries:", err instanceof Error ? err.message : err);
+    return dummySummaries(transcript, metadata);
   }
 }
 
+// ---------------------------------------------------------------------------
 // Agent C: flashcards + concepts (Haiku, fast, cheap)
+// ---------------------------------------------------------------------------
 async function buildCards(
   transcript: string,
   metadata: VideoMetadata,
@@ -132,8 +185,8 @@ Rules:
 - Each timestamp should match when the answered idea is first substantially covered (not arbitrary ordering).`;
 
   const maxTok = Math.max(900, numFlashcards * 120 + numConcepts * 30);
-  const raw = await invokeAgent(sys, msg, maxTok, MODEL_HAIKU);
   try {
+    const raw = await invokeAgent(sys, msg, maxTok, MODEL_HAIKU);
     const m = raw.match(/\{[\s\S]*\}/);
     if (!m) throw new Error("No JSON");
     const p = JSON.parse(m[0]) as { flashcards: StudyMaterials["flashcards"]; concepts: StudyMaterials["concepts"] };
@@ -142,8 +195,9 @@ Rules:
       flashcards: sortFlashcardsChronologically(list),
       concepts: Array.isArray(p.concepts) ? p.concepts : [],
     };
-  } catch {
-    return { flashcards: [], concepts: [] };
+  } catch (err) {
+    console.warn("[buildCards] AI call failed, using dummy cards:", err instanceof Error ? err.message : err);
+    return dummyCards(metadata, totalDuration, numFlashcards);
   }
 }
 
@@ -161,19 +215,33 @@ export async function processTranscript(
   const transcriptForOutline = sampleTranscript(entries, 6000);
   const transcriptForContent = sampleTranscript(entries, 8000);
 
-  // All three agents fire simultaneously
-  const [lecture, summaries, cards] = await Promise.all([
-    buildOutline(transcriptForOutline, metadata, totalDuration, numSections),
-    buildSummaries(transcriptForContent, metadata),
-    buildCards(transcriptForContent, metadata, totalDuration, numFlashcards, numConcepts),
-  ]);
+  try {
+    // All three agents fire simultaneously; each has its own dummy fallback on error
+    const [lecture, summaries, cards] = await Promise.all([
+      buildOutline(transcriptForOutline, metadata, totalDuration, numSections),
+      buildSummaries(transcriptForContent, metadata),
+      buildCards(transcriptForContent, metadata, totalDuration, numFlashcards, numConcepts),
+    ]);
 
-  return {
-    lecture,
-    studyMaterials: {
-      summaries,
-      flashcards: cards.flashcards,
-      concepts: cards.concepts,
-    },
-  };
+    return {
+      lecture,
+      studyMaterials: {
+        summaries,
+        flashcards: cards.flashcards,
+        concepts: cards.concepts,
+      },
+    };
+  } catch (err) {
+    // Safety net: should not be reached because each agent already swallows errors,
+    // but guard against any future agent being added without a try/catch.
+    console.error("[processTranscript] Unexpected error, returning full dummy output:", err);
+    return {
+      lecture: dummyOutline(metadata, totalDuration, numSections),
+      studyMaterials: {
+        summaries: dummySummaries(transcriptForContent, metadata),
+        flashcards: dummyCards(metadata, totalDuration, numFlashcards).flashcards,
+        concepts: dummyCards(metadata, totalDuration, numFlashcards).concepts,
+      },
+    };
+  }
 }
