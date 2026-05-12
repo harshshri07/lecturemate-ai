@@ -347,9 +347,14 @@ async function fetchTranscriptViaProxy(videoId: string): Promise<TranscriptEntry
 }
 
 export async function fetchTranscript(videoId: string): Promise<TranscriptEntry[]> {
-  // Try a sequence of language tracks before giving up.
-  // Many lectures have auto-generated captions in the original language but not English.
-  const languagesToTry = ["en", "en-US", "en-GB", "es", "fr", "de", "hi", "zh", "ja", "ko", "pt", "ru"];
+  // Use captions.list (YouTube Data API v3) to discover available tracks and
+  // put them first in the language list. Falls back to a broad static list when
+  // no API key is configured or the call fails.
+  const apiLanguages = await fetchCaptionLanguages(videoId);
+  const fallbackLanguages = ["en", "en-US", "en-GB", "es", "fr", "de", "hi", "zh", "ja", "ko", "pt", "ru"];
+  const languagesToTry = apiLanguages.length > 0
+    ? [...new Set([...apiLanguages, ...fallbackLanguages])]
+    : fallbackLanguages;
 
   let lastError: unknown = null;
 
@@ -428,13 +433,111 @@ export async function fetchTranscript(videoId: string): Promise<TranscriptEntry[
   );
 }
 
+/** Parse ISO 8601 duration strings returned by the YouTube Data API v3 (e.g. "PT1H4M52S"). */
+function parseIso8601Duration(d: string): number {
+  const m = d.match(/PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+(?:\.\d+)?)S)?/);
+  if (!m) return 0;
+  return (parseInt(m[1] ?? "0", 10) * 3600) +
+         (parseInt(m[2] ?? "0", 10) * 60) +
+         (parseFloat(m[3] ?? "0") || 0);
+}
+
+/**
+ * Calls YouTube Data API v3 `captions.list` to discover which caption language
+ * codes are actually available. Returns the codes sorted by preference (manual
+ * English first, then auto-generated, then others). Falls back to an empty array
+ * when the API key is absent or the call fails.
+ *
+ * Note: `captions.download` requires OAuth; this only lists available tracks so
+ * the transcript fallback chain can prioritise the right languages.
+ */
+export async function fetchCaptionLanguages(videoId: string): Promise<string[]> {
+  const apiKey = process.env.YOUTUBE_API_KEY;
+  if (!apiKey) return [];
+  try {
+    const url = `https://www.googleapis.com/youtube/v3/captions?part=snippet&videoId=${videoId}&key=${encodeURIComponent(apiKey)}`;
+    const res = await fetch(url, { signal: AbortSignal.timeout(8000) });
+    if (!res.ok) return [];
+    const data = await res.json() as {
+      items?: { snippet: { language: string; trackKind: string } }[];
+    };
+    const items = data.items ?? [];
+    // Sort: manual English tracks first, then other manuals, then auto-generated
+    items.sort((a, b) => {
+      const score = (s: { language: string; trackKind: string }) => {
+        let sc = 0;
+        if (s.trackKind !== "asr") sc += 100;
+        const lang = s.language.toLowerCase();
+        if (lang === "en" || lang.startsWith("en-")) sc += 50;
+        return sc;
+      };
+      return score(b.snippet) - score(a.snippet);
+    });
+    return items.map((i) => i.snippet.language);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Fetches video metadata using YouTube Data API v3 `videos.list` when
+ * `YOUTUBE_API_KEY` is set. Falls back to the oEmbed endpoint (no key required)
+ * so development without a key still works. The Data API provides accurate
+ * duration and higher-resolution thumbnail choices.
+ */
 export async function fetchVideoMetadata(videoId: string): Promise<VideoMetadata> {
-  // Use oEmbed API (no API key required) for title/channel
+  const apiKey = process.env.YOUTUBE_API_KEY;
+
+  if (apiKey) {
+    try {
+      const url =
+        `https://www.googleapis.com/youtube/v3/videos` +
+        `?part=snippet,contentDetails` +
+        `&id=${encodeURIComponent(videoId)}` +
+        `&key=${encodeURIComponent(apiKey)}`;
+      const res = await fetch(url, { signal: AbortSignal.timeout(8000) });
+      if (res.ok) {
+        const data = await res.json() as {
+          items?: {
+            snippet: {
+              title: string;
+              channelTitle: string;
+              thumbnails: {
+                maxres?: { url: string };
+                high?: { url: string };
+                medium?: { url: string };
+                default?: { url: string };
+              };
+            };
+            contentDetails: { duration: string };
+          }[];
+        };
+        const item = data.items?.[0];
+        if (item) {
+          const { snippet, contentDetails } = item;
+          const thumbnailUrl =
+            snippet.thumbnails.maxres?.url ??
+            snippet.thumbnails.high?.url ??
+            snippet.thumbnails.medium?.url ??
+            `https://img.youtube.com/vi/${videoId}/maxresdefault.jpg`;
+          return {
+            videoId,
+            title: snippet.title ?? "YouTube Lecture",
+            channelName: snippet.channelTitle ?? "Unknown Channel",
+            duration: parseIso8601Duration(contentDetails.duration),
+            thumbnailUrl,
+          };
+        }
+      }
+    } catch {
+      // fall through to oEmbed
+    }
+  }
+
+  // oEmbed fallback (no API key required)
   const oembedUrl = `https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=${videoId}&format=json`;
-  
   let title = "YouTube Lecture";
   let channelName = "Unknown Channel";
-
   try {
     const res = await fetch(oembedUrl, { signal: AbortSignal.timeout(8000) });
     if (res.ok) {
@@ -443,9 +546,8 @@ export async function fetchVideoMetadata(videoId: string): Promise<VideoMetadata
       channelName = data.author_name ?? channelName;
     }
   } catch {
-    // fallback to defaults
+    // fall back to defaults
   }
-
   return {
     videoId,
     title,
