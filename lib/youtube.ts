@@ -1,5 +1,5 @@
-import { YoutubeTranscript } from "youtube-transcript";
-import { getSubtitles } from "youtube-caption-extractor";
+import { YoutubeTranscript } from "youtube-transcript";       // kept for reference — commented out below
+import { getSubtitles } from "youtube-caption-extractor";    // kept for reference — commented out below
 
 export interface VideoMetadata {
   videoId: string;
@@ -346,120 +346,140 @@ async function fetchTranscriptViaProxy(videoId: string): Promise<TranscriptEntry
   return null;
 }
 
-export async function fetchTranscript(videoId: string): Promise<TranscriptEntry[]> {
-  // Use captions.list (YouTube Data API v3) to discover available tracks and
-  // put them first in the language list. Falls back to a broad static list when
-  // no API key is configured or the call fails.
-  const apiLanguages = await fetchCaptionLanguages(videoId);
-  console.log(`[fetchTranscript] videoId=${videoId}  API caption tracks:`, apiLanguages.length ? apiLanguages : "(none — no API key or call failed)");
+type SupadataChunk = { text: string; offset: number; duration: number; lang?: string };
 
-  const fallbackLanguages = ["en", "en-US", "en-GB", "es", "fr", "de", "hi", "zh", "ja", "ko", "pt", "ru"];
-  const languagesToTry = apiLanguages.length > 0
-    ? [...new Set([...apiLanguages, ...fallbackLanguages])]
-    : fallbackLanguages;
-
-  let lastError: unknown = null;
-
-  // 1. Prefer default track first (youtube-transcript)
-  try {
-    const transcript = await YoutubeTranscript.fetchTranscript(videoId);
-    if (transcript.length > 0) {
-      console.log(`[fetchTranscript] ✅ strategy 1 (youtube-transcript default)  entries=${transcript.length}`);
-      return transcript.map((entry) => ({
-        text: entry.text,
-        offset: entry.offset / 1000,
-        duration: entry.duration / 1000,
+/**
+ * Polls a Supadata async job until it completes or times out (60s).
+ * Large videos (>20 min) return HTTP 202 + jobId instead of the transcript directly.
+ */
+async function pollSupadataJob(apiKey: string, jobId: string): Promise<TranscriptEntry[]> {
+  const maxAttempts = 60;
+  for (let i = 0; i < maxAttempts; i++) {
+    await sleep(1000);
+    const res = await fetch(`https://api.supadata.ai/v1/transcript/${jobId}`, {
+      headers: { "x-api-key": apiKey },
+      signal: AbortSignal.timeout(10000),
+    });
+    if (!res.ok) {
+      console.warn(`[pollSupadataJob] poll ${i + 1} returned HTTP ${res.status}`);
+      continue;
+    }
+    const data = await res.json() as {
+      status?: string;
+      content?: SupadataChunk[] | string;
+      error?: string;
+    };
+    console.log(`[pollSupadataJob] attempt ${i + 1}  status=${data.status}`);
+    if (data.status === "completed") {
+      if (!data.content) throw new Error("Supadata job completed but content is empty.");
+      if (typeof data.content === "string") {
+        return [{ text: data.content, offset: 0, duration: 0 }];
+      }
+      return data.content.map((c) => ({
+        text: c.text,
+        offset: c.offset / 1000,
+        duration: c.duration / 1000,
       }));
     }
-    console.warn(`[fetchTranscript] strategy 1 returned empty array`);
-  } catch (err) {
-    lastError = err;
-    console.warn(`[fetchTranscript] strategy 1 failed:`, err instanceof Error ? err.message : err);
+    if (data.status === "failed") throw new Error(`Supadata job failed: ${data.error ?? "unknown"}`);
+  }
+  throw new Error("Supadata job timed out after 60 seconds.");
+}
+
+/**
+ * Fetches transcript via Supadata API (https://supadata.ai).
+ * Handles both immediate (HTTP 200) and async (HTTP 202 + jobId) responses.
+ * Uses mode=native to only fetch existing captions (1 credit).
+ * Set SUPADATA_API_KEY in env.
+ */
+async function fetchTranscriptViaSupadata(videoId: string): Promise<TranscriptEntry[]> {
+  const apiKey = process.env.SUPADATA_API_KEY;
+  if (!apiKey) throw new Error("SUPADATA_API_KEY is not set. Add it to your environment variables.");
+
+  const videoUrl = `https://www.youtube.com/watch?v=${videoId}`;
+  const endpoint =
+    `https://api.supadata.ai/v1/transcript` +
+    `?url=${encodeURIComponent(videoUrl)}&lang=en&mode=native`;
+
+  console.log(`[fetchTranscriptViaSupadata] GET ${endpoint}`);
+  const res = await fetch(endpoint, {
+    headers: { "x-api-key": apiKey },
+    signal: AbortSignal.timeout(35000),
+  });
+
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new Error(`Supadata API error: HTTP ${res.status} — ${body.slice(0, 300)}`);
   }
 
-  // 2. Try each language explicitly
-  for (const lang of languagesToTry) {
-    try {
-      const transcript = await YoutubeTranscript.fetchTranscript(videoId, { lang });
-      if (transcript.length > 0) {
-        console.log(`[fetchTranscript] ✅ strategy 2 (youtube-transcript lang=${lang})  entries=${transcript.length}`);
-        return transcript.map((entry) => ({
-          text: entry.text,
-          offset: entry.offset / 1000,
-          duration: entry.duration / 1000,
-        }));
-      }
-    } catch (err) {
-      lastError = err;
-      console.warn(`[fetchTranscript] strategy 2 lang=${lang} failed:`, err instanceof Error ? err.message : err);
-    }
+  // HTTP 202 = async job for long videos
+  if (res.status === 202) {
+    const { jobId } = await res.json() as { jobId: string };
+    console.log(`[fetchTranscriptViaSupadata] async job started  jobId=${jobId}`);
+    return pollSupadataJob(apiKey, jobId);
   }
 
-  // 3. Dedicated transcript proxy (Railway/Render) — separate egress IPs from Vercel
+  const data = await res.json() as {
+    content?: SupadataChunk[] | string;
+    lang?: string;
+    availableLangs?: string[];
+  };
+
+  console.log(`[fetchTranscriptViaSupadata] received  lang=${data.lang}  availableLangs=${data.availableLangs?.join(",")}`);
+
+  if (!data.content || (Array.isArray(data.content) && data.content.length === 0)) {
+    throw new Error("Supadata returned empty transcript content.");
+  }
+
+  // Plain-text fallback (shouldn't happen with text=false default, but guard it)
+  if (typeof data.content === "string") {
+    return [{ text: data.content, offset: 0, duration: 0 }];
+  }
+
+  const entries = data.content.map((c) => ({
+    text: c.text,
+    offset: c.offset / 1000,   // ms → seconds
+    duration: c.duration / 1000,
+  }));
+  console.log(`[fetchTranscriptViaSupadata] ✅ ${entries.length} entries  lang=${data.lang}`);
+  return entries;
+}
+
+export async function fetchTranscript(videoId: string): Promise<TranscriptEntry[]> {
+  // ── Primary: Supadata managed API ────────────────────────────────────────
+  // Reliably bypasses YouTube's datacenter IP blocks (Vercel, Railway, etc.).
+  // Free tier: 100 transcripts/month — https://supadata.ai
   try {
-    const viaProxy = await fetchTranscriptViaProxy(videoId);
-    if (viaProxy && viaProxy.length > 0) {
-      console.log(`[fetchTranscript] ✅ strategy 3 (proxy)  entries=${viaProxy.length}`);
-      return viaProxy;
-    }
-    console.warn(`[fetchTranscript] strategy 3 (proxy) returned null/empty`);
+    const entries = await fetchTranscriptViaSupadata(videoId);
+    if (entries.length > 0) return entries;
   } catch (err) {
-    lastError = err;
-    console.warn(`[fetchTranscript] strategy 3 (proxy) failed:`, err instanceof Error ? err.message : err);
+    console.error(`[fetchTranscript] Supadata failed:`, err instanceof Error ? err.message : err);
+    throw err;
   }
 
-  // 4. Piped proxy path (before caption-extractor): different egress; often works on Vercel when YouTube blocks datacenter IPs.
-  try {
-    const viaPiped = await fetchTranscriptViaPipedBackends(videoId);
-    if (viaPiped && viaPiped.length > 0) {
-      console.log(`[fetchTranscript] ✅ strategy 4 (Piped)  entries=${viaPiped.length}`);
-      return viaPiped;
-    }
-    console.warn(`[fetchTranscript] strategy 4 (Piped) returned null/empty`);
-  } catch (err) {
-    lastError = err;
-    console.warn(`[fetchTranscript] strategy 4 (Piped) failed:`, err instanceof Error ? err.message : err);
-  }
+  // ── Commented-out fallback strategies (re-enable if needed) ───────────────
 
-  // 5. youtube-caption-extractor (InnerTube-style; can still fail on strict blocks)
-  try {
-    const viaExtractor = await fetchTranscriptViaExtractor(videoId);
-    if (viaExtractor && viaExtractor.length > 0) {
-      console.log(`[fetchTranscript] ✅ strategy 5 (caption-extractor)  entries=${viaExtractor.length}`);
-      return viaExtractor;
-    }
-    console.warn(`[fetchTranscript] strategy 5 (caption-extractor) returned null/empty`);
-  } catch (err) {
-    lastError = err;
-    console.warn(`[fetchTranscript] strategy 5 (caption-extractor) failed:`, err instanceof Error ? err.message : err);
-  }
+  // // Strategy: YouTube Data API v3 captions.download (requires OAuth for 3rd-party videos)
+  // try {
+  //   const entries = await fetchTranscriptViaYouTubeApi(videoId);
+  //   if (entries.length > 0) return entries;
+  // } catch (err) { console.warn("[fetchTranscript] YouTube API failed:", err); }
 
-  // 6. Second Piped pass after cooldown (rate limits / transient 5xx)
-  if (isLikelyServerlessEgress()) {
-    console.log(`[fetchTranscript] serverless env detected — retrying Piped after 900ms cooldown…`);
-    try {
-      await sleep(900);
-      const viaPiped2 = await fetchTranscriptViaPipedBackends(videoId);
-      if (viaPiped2 && viaPiped2.length > 0) {
-        console.log(`[fetchTranscript] ✅ strategy 6 (Piped retry)  entries=${viaPiped2.length}`);
-        return viaPiped2;
-      }
-      console.warn(`[fetchTranscript] strategy 6 (Piped retry) returned null/empty`);
-    } catch (err) {
-      lastError = err;
-      console.warn(`[fetchTranscript] strategy 6 (Piped retry) failed:`, err instanceof Error ? err.message : err);
-    }
-  }
+  // // Strategy: youtube-transcript library (blocked on Vercel/Railway)
+  // try {
+  //   const t = await YoutubeTranscript.fetchTranscript(videoId);
+  //   if (t.length > 0) return t.map((e) => ({ text: e.text, offset: e.offset / 1000, duration: e.duration / 1000 }));
+  // } catch (err) { console.warn("[fetchTranscript] youtube-transcript failed:", err); }
 
-  // 7. Friendly error
-  const msg = lastError instanceof Error ? lastError.message : String(lastError);
-  console.error(`[fetchTranscript] ❌ all strategies exhausted for videoId=${videoId}  lastError=${msg}`);
-  if (msg.includes("private") || msg.includes("unavailable")) {
-    throw new Error("This video is private or unavailable. Try a public video.");
-  }
-  throw new Error(
-    "We could not download captions for this video. YouTube often blocks or rate-limits transcript fetches from cloud servers even when CC is visible in the browser. Fix: set PIPED_BACKEND_URLS to one or more reachable Piped API bases (comma-separated, see .env.example), self-host Piped for reliability, wait and retry, or run the app from localhost for development."
-  );
+  // // Strategy: Piped proxy backends
+  // const viaPiped = await fetchTranscriptViaPipedBackends(videoId);
+  // if (viaPiped && viaPiped.length > 0) return viaPiped;
+
+  // // Strategy: youtube-caption-extractor (InnerTube)
+  // const viaExtractor = await fetchTranscriptViaExtractor(videoId);
+  // if (viaExtractor && viaExtractor.length > 0) return viaExtractor;
+
+  throw new Error("No transcript entries returned.");
 }
 
 /** Parse ISO 8601 duration strings returned by the YouTube Data API v3 (e.g. "PT1H4M52S"). */
