@@ -1,3 +1,5 @@
+// Legacy — types (LectureSection, StructuredLecture) and structureTranscript() are
+// kept for backwards compatibility. The main pipeline now uses lib/agents/combined.ts.
 import { invokeAgent } from "../bedrock";
 import { TranscriptEntry, VideoMetadata } from "../youtube";
 

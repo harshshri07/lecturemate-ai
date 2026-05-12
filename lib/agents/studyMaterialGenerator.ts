@@ -1,3 +1,6 @@
+// Legacy — Flashcard, StudyMaterials types and sortFlashcardsChronologically()
+// are still used by combined.ts. generateStudyMaterials() is kept for reference
+// but is no longer called by the main pipeline (replaced by combined.ts buildCards).
 import { invokeAgent } from "../bedrock";
 import { StructuredLecture } from "./structurer";
 

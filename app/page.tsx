@@ -8,6 +8,7 @@ import {
   Quote, Sparkles, List, CheckCircle2, Clock,
   Zap, Coffee, Target, GraduationCap, BookOpen, Headphones,
   Trophy, RotateCcw, Star, X, MessageCircle, Send, LineChart, UserRound, Trash2,
+  Languages,
 } from "lucide-react";
 import { useSession } from "next-auth/react";
 import { signOut } from "next-auth/react";
@@ -3124,6 +3125,71 @@ function SummaryTab({ materials, skillLevel }: { materials: StudyMaterials; skil
   };
   const badge = skillLevel ? levelBadge[skillLevel] : null;
 
+  // ── Bilingual support ──────────────────────────────────────────────────────
+  const LANGUAGES: Record<string, string> = {
+    es: "Español", fr: "Français", de: "Deutsch", hi: "हिंदी",
+    zh: "中文", ja: "日本語", pt: "Português", ar: "العربية",
+    ko: "한국어", it: "Italiano",
+  };
+  const [activeLang, setActiveLang] = useState("");
+  const [translating, setTranslating] = useState(false);
+  // key: "${lang}:::${mode}" — all three modes are fetched in parallel on language select
+  const [cache, setCache] = useState<Record<string, string>>({});
+  const [langOpen, setLangOpen] = useState(false);
+  const abortRef = useRef<AbortController | null>(null);
+
+  // When language changes: fire 3 parallel fetches (short + medium + full) at once.
+  // By the time the user clicks a different depth tab, it's already cached → instant.
+  useEffect(() => {
+    if (!activeLang) return;
+
+    const allModes: Array<"short" | "medium" | "full"> = ["short", "medium", "full"];
+    const toFetch = allModes.filter(m => !cache[`${activeLang}:::${m}`]);
+    if (toFetch.length === 0) return;
+
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
+    setTranslating(true);
+
+    let remaining = toFetch.length;
+
+    toFetch.forEach(m => {
+      fetch("/api/translate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        signal: controller.signal,
+        body: JSON.stringify({ content: materials.summaries[m], targetLang: activeLang }),
+      })
+        .then(r => r.json())
+        .then(data => {
+          if (typeof data.translated === "string") {
+            setCache(prev => ({ ...prev, [`${activeLang}:::${m}`]: data.translated as string }));
+          }
+        })
+        .catch(err => { if (err.name !== "AbortError") console.error("[translate]", err); })
+        .finally(() => {
+          remaining--;
+          if (remaining <= 0 && !controller.signal.aborted) setTranslating(false);
+        });
+    });
+
+    return () => controller.abort();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeLang]);
+
+  const cancel = () => {
+    abortRef.current?.abort();
+    setTranslating(false);
+    setActiveLang("");
+    setLangOpen(false);
+  };
+
+  const displayText = (activeLang && cache[`${activeLang}:::${mode}`])
+    ? cache[`${activeLang}:::${mode}`]
+    : materials.summaries[mode];
+  // ──────────────────────────────────────────────────────────────────────────
+
   return (
     <div>
       <div className="flex items-center justify-between mb-6 flex-wrap gap-3">
@@ -3136,24 +3202,76 @@ function SummaryTab({ materials, skillLevel }: { materials: StudyMaterials; skil
             </span>
           )}
         </div>
-        <div className="flex items-center gap-1 surface rounded-lg p-1">
-          {modes.map((m) => (
-            <button key={m.id} onClick={() => setMode(m.id)}
-              className="relative px-3 py-1.5 rounded-md text-xs font-medium transition"
-              style={{ color: mode === m.id ? "var(--background)" : "var(--muted-foreground)" }}>
-              {mode === m.id && (
-                <motion.div layoutId="summary-bg" className="absolute inset-0 rounded-md"
-                  style={{ background: "var(--foreground)" }}
-                  transition={{ type: "spring", stiffness: 400, damping: 30 }} />
-              )}
-              <span className="relative">{m.label} <span className="opacity-60 font-mono ml-1">{m.time}</span></span>
-            </button>
-          ))}
+        <div className="flex items-center gap-2">
+          {/* Language picker */}
+          <div className="relative">
+            {translating ? (
+              <button onClick={cancel}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs font-medium transition"
+                style={{ borderColor: "var(--warning)", color: "var(--warning)", background: "color-mix(in oklab, var(--warning) 8%, transparent)" }}>
+                <Loader2 className="h-3 w-3 animate-spin" />
+                Translating…
+                <X className="h-3 w-3 ml-0.5 opacity-70" />
+              </button>
+            ) : (
+              <button onClick={() => setLangOpen(o => !o)}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs font-medium transition hover:opacity-80"
+                style={{
+                  borderColor: activeLang ? "var(--primary)" : "var(--border)",
+                  color: activeLang ? "var(--primary)" : "var(--muted-foreground)",
+                  background: activeLang ? "color-mix(in oklab, var(--primary) 8%, transparent)" : "transparent",
+                }}>
+                <Languages className="h-3 w-3" />
+                {activeLang ? LANGUAGES[activeLang] : "Translate"}
+                {activeLang && (
+                  <span onClick={(e) => { e.stopPropagation(); cancel(); }}
+                    className="ml-0.5 opacity-60 hover:opacity-100 transition">
+                    <X className="h-3 w-3" />
+                  </span>
+                )}
+              </button>
+            )}
+            {langOpen && !translating && (
+              <div className="absolute right-0 top-full mt-1 z-50 rounded-xl border shadow-lg overflow-hidden"
+                style={{ background: "var(--surface)", borderColor: "var(--border)", minWidth: "9rem" }}>
+                {activeLang && (
+                  <button onClick={() => { cancel(); setLangOpen(false); }}
+                    className="w-full text-left px-3 py-2 text-xs hover:opacity-70 transition border-b"
+                    style={{ borderColor: "var(--border)", color: "var(--primary)" }}>
+                    ✕ English (original)
+                  </button>
+                )}
+                {Object.entries(LANGUAGES).map(([code, label]) => (
+                  <button key={code} onClick={() => { setActiveLang(code); setLangOpen(false); }}
+                    className="w-full text-left px-3 py-2 text-xs hover:opacity-70 transition"
+                    style={{ color: activeLang === code ? "var(--primary)" : "var(--foreground)" }}>
+                    {label}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+          {/* Depth selector */}
+          <div className="flex items-center gap-1 surface rounded-lg p-1">
+            {modes.map((m) => (
+              <button key={m.id} onClick={() => setMode(m.id)}
+                className="relative px-3 py-1.5 rounded-md text-xs font-medium transition"
+                style={{ color: mode === m.id ? "var(--background)" : "var(--muted-foreground)" }}>
+                {mode === m.id && (
+                  <motion.div layoutId="summary-bg" className="absolute inset-0 rounded-md"
+                    style={{ background: "var(--foreground)" }}
+                    transition={{ type: "spring", stiffness: 400, damping: 30 }} />
+                )}
+                <span className="relative">{m.label} <span className="opacity-60 font-mono ml-1">{m.time}</span></span>
+              </button>
+            ))}
+          </div>
         </div>
       </div>
       <AnimatePresence mode="wait">
-        <motion.div key={mode} initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -4 }} transition={{ duration: 0.2 }}>
-          {materials.summaries[mode].split(/\n\n+/).filter((p) => p.trim()).map((block, i) => (
+        <motion.div key={mode + activeLang} initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -4 }} transition={{ duration: 0.2 }}
+          className={translating && activeLang && !cache[`${activeLang}:::${mode}`] ? "opacity-40 pointer-events-none" : ""}>
+          {displayText.split(/\n\n+/).filter((p) => p.trim()).map((block, i) => (
             <div key={i} className="mb-4 text-[15px] leading-relaxed [&_ul]:my-2 [&_ol]:my-2" style={{ color: "color-mix(in oklab, var(--foreground) 88%, transparent)" }}>
               {renderChatMarkdown(block.trim())}
             </div>
@@ -3226,20 +3344,66 @@ function FlashcardsTab({
 
   const [idx, setIdx] = useState(0);
   const [flipped, setFlipped] = useState(false);
-  const cards = orderedCards;
+  const reviewedSet = useMemo(() => new Set(reviewed), [reviewed]);
+
+  // ── Bilingual support ──────────────────────────────────────────────────────
+  const LANGUAGES: Record<string, string> = {
+    es: "Español", fr: "Français", de: "Deutsch", hi: "हिंदी",
+    zh: "中文", ja: "日本語", pt: "Português", ar: "العربية",
+    ko: "한국어", it: "Italiano",
+  };
+  const [activeLang, setActiveLang] = useState("");
+  const [translating, setTranslating] = useState(false);
+  const [cardCache, setCardCache] = useState<Record<string, typeof orderedCards>>({});
+  const [langOpen, setLangOpen] = useState(false);
+  const abortRef = useRef<AbortController | null>(null);
+
+  const cancel = () => {
+    abortRef.current?.abort();
+    setTranslating(false);
+    setActiveLang("");
+    setLangOpen(false);
+  };
+
+  const translateCards = (lang: string) => {
+    setLangOpen(false);
+    if (!lang) { cancel(); return; }
+    if (cardCache[lang]) { setActiveLang(lang); return; }
+
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
+    setActiveLang(lang);
+    setTranslating(true);
+
+    fetch("/api/translate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      signal: controller.signal,
+      body: JSON.stringify({ content: orderedCards, targetLang: lang }),
+    })
+      .then(r => r.json())
+      .then(data => {
+        if (Array.isArray(data.translated)) {
+          setCardCache(prev => ({ ...prev, [lang]: data.translated as typeof orderedCards }));
+        }
+      })
+      .catch(err => { if (err.name !== "AbortError") console.error("[translate]", err); })
+      .finally(() => setTranslating(false));
+  };
+
+  const cards = (activeLang && cardCache[activeLang]) ? cardCache[activeLang] : orderedCards;
+  // ──────────────────────────────────────────────────────────────────────────
+
   const card = cards[idx];
   const total = cards.length;
   const nav = (dir: 1 | -1) => { setFlipped(false); setTimeout(() => setIdx((i) => (i + dir + total) % total), 120); };
-  const reviewedSet = useMemo(() => new Set(reviewed), [reviewed]);
 
   // Auto-mark as reviewed when user flips the card
   const handleFlip = useCallback(() => {
     setFlipped(f => {
       const nextFlipped = !f;
-      // Mark as reviewed when flipping to answer side
-      if (nextFlipped && !reviewedSet.has(idx)) {
-        onReviewed(idx);
-      }
+      if (nextFlipped && !reviewedSet.has(idx)) onReviewed(idx);
       return nextFlipped;
     });
   }, [idx, reviewedSet, onReviewed]);
@@ -3250,9 +3414,59 @@ function FlashcardsTab({
     <div>
       <div className="flex items-baseline justify-between mb-5">
         <h3 className="font-serif text-2xl">Flashcards</h3>
-        <span className="font-mono text-xs tabular-nums" style={{ color: "var(--muted-foreground)" }}>
-          {String(idx + 1).padStart(2, "0")} / {String(total).padStart(2, "0")}
-        </span>
+        <div className="flex items-center gap-3">
+          {/* Language picker */}
+          <div className="relative">
+            {translating ? (
+              <button onClick={cancel}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs font-medium transition"
+                style={{ borderColor: "var(--warning)", color: "var(--warning)", background: "color-mix(in oklab, var(--warning) 8%, transparent)" }}>
+                <Loader2 className="h-3 w-3 animate-spin" />
+                Translating…
+                <X className="h-3 w-3 ml-0.5 opacity-70" />
+              </button>
+            ) : (
+              <button onClick={() => setLangOpen(o => !o)}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs font-medium transition hover:opacity-80"
+                style={{
+                  borderColor: activeLang ? "var(--primary)" : "var(--border)",
+                  color: activeLang ? "var(--primary)" : "var(--muted-foreground)",
+                  background: activeLang ? "color-mix(in oklab, var(--primary) 8%, transparent)" : "transparent",
+                }}>
+                <Languages className="h-3 w-3" />
+                {activeLang ? LANGUAGES[activeLang] : "Translate"}
+                {activeLang && (
+                  <span onClick={(e) => { e.stopPropagation(); cancel(); }}
+                    className="ml-0.5 opacity-60 hover:opacity-100 transition">
+                    <X className="h-3 w-3" />
+                  </span>
+                )}
+              </button>
+            )}
+            {langOpen && !translating && (
+              <div className="absolute right-0 top-full mt-1 z-50 rounded-xl border shadow-lg overflow-hidden"
+                style={{ background: "var(--surface)", borderColor: "var(--border)", minWidth: "9rem" }}>
+                {activeLang && (
+                  <button onClick={() => { cancel(); setLangOpen(false); }}
+                    className="w-full text-left px-3 py-2 text-xs hover:opacity-70 transition border-b"
+                    style={{ borderColor: "var(--border)", color: "var(--primary)" }}>
+                    ✕ English (original)
+                  </button>
+                )}
+                {Object.entries(LANGUAGES).map(([code, label]) => (
+                  <button key={code} onClick={() => translateCards(code)}
+                    className="w-full text-left px-3 py-2 text-xs hover:opacity-70 transition"
+                    style={{ color: activeLang === code ? "var(--primary)" : "var(--foreground)" }}>
+                    {label}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+          <span className="font-mono text-xs tabular-nums" style={{ color: "var(--muted-foreground)" }}>
+            {String(idx + 1).padStart(2, "0")} / {String(total).padStart(2, "0")}
+          </span>
+        </div>
       </div>
 
       {/* Progress dots */}
